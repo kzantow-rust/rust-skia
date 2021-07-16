@@ -22,7 +22,7 @@ crate-bindings-binaries:
 .PHONY: crate-bindings-build
 crate-bindings-build: export FORCE_SKIA_BUILD=1
 crate-bindings-build: 
-	cd skia-bindings && cargo publish -vv --dry-run --no-default-features --features "gl,vulkan,textlayout,d3d"
+	cd skia-bindings && cargo publish -vv --dry-run --features "gl,vulkan,textlayout,d3d"
 	cd skia-bindings && cargo publish -vv --dry-run 
 
 .PHONY: publish
@@ -90,4 +90,33 @@ github-build-win:
 .PHONY: workflows
 workflows:
 	cargo run -p mk-workflows
+
+# Tests local builds based on the env vars `SKIA_BUILD_DEFINES` and `SKIA_LIBRARY_SEARCH_PATH`.
+#
+# This builds a set of libraries, copies them away and then tries to build with the libraries
+# referenced through `SKIA_LIBRARY_SEARCH_PATH`.
+#
+# https://github.com/rust-skia/rust-skia/pull/527
+
+local-build-features=gl,vulkan,webp,textlayout
+
+.PHONY: test-local-build prepare-local-build build-local-build
+test-local-build: prepare-local-build build-local-build
+
+prepare-local-build:
+	cargo clean
+	cargo build --release --features ${local-build-features}
+	rm -rf tmp/
+	mkdir -p tmp/
+	find target -name "libsk*.a" -type f -exec cp {} tmp/ \;
+	find target -name "skia-defines.txt" -type f -exec cp {} tmp/ \;
+	# Windows
+	find target -name "sk*.lib" -type f -exec cp {} tmp/ \;
+	find target -name "icudtl.dat" -type f -exec cp {} tmp/ \;
+	# The bindings are expected to be regenerated in a local build.
+	rm tmp/*-bindings.*
+
+build-local-build:
+	cargo clean
+	SKIA_SOURCE_DIR=$(shell pwd)/skia-bindings/skia SKIA_BUILD_DEFINES=`cat tmp/skia-defines.txt` SKIA_LIBRARY_SEARCH_PATH=$(shell pwd)/tmp cargo build --release --no-default-features -vv --features ${local-build-features}
 

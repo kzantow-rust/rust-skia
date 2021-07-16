@@ -457,7 +457,7 @@ impl<'a, T: RunHandler> AsRunHandler<'a> for T {
     where
         'b: 'a,
     {
-        let param = rust_run_handler::new_param(self);
+        let param = unsafe { rust_run_handler::new_param(self) };
         rust_run_handler::from_param(&param)
     }
 }
@@ -568,9 +568,9 @@ mod rust_run_handler {
         }
     }
 
-    pub fn new_param(run_handler: &mut dyn RunHandler) -> RustRunHandler_Param {
+    pub unsafe fn new_param(run_handler: &mut dyn RunHandler) -> RustRunHandler_Param {
         RustRunHandler_Param {
-            trait_: unsafe { mem::transmute(run_handler) },
+            trait_: mem::transmute(run_handler),
             beginLine: Some(begin_line),
             runInfo: Some(run_info),
             commitRunInfo: Some(commit_run_info),
@@ -736,7 +736,7 @@ pub mod icu {
         skia_bindings::icu::init();
         let str = "العربية";
         let mut text_blob_builder_run_handler =
-            crate::shaper::TextBlobBuilderRunHandler::new(&str, crate::Point::default());
+            crate::shaper::TextBlobBuilderRunHandler::new(str, crate::Point::default());
 
         let shaper = crate::Shaper::new(None);
 

@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::{prelude::*, Rect};
 #[allow(deprecated)]
 use crate::{scalar, Matrix, Matrix44, Scalars};
 use bitflags::_core::ops::{AddAssign, MulAssign};
@@ -520,6 +520,11 @@ impl M44 {
         m
     }
 
+    pub fn rect_to_rect(src: impl AsRef<Rect>, dst: impl AsRef<Rect>) -> Self {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+        Self::construct(|m| unsafe { sb::C_SkM44_RectToRect(src.native(), dst.native(), m) })
+    }
+
     pub fn look_at(eye: &V3, center: &V3, up: &V3) -> Self {
         Self::construct(|m| unsafe {
             sb::C_SkM44_LookAt(eye.native(), center.native(), up.native(), m)
@@ -767,6 +772,11 @@ impl M44 {
         self
     }
 
+    pub fn pre_scale_xyz(&mut self, x: scalar, y: scalar, z: scalar) -> &mut Self {
+        unsafe { self.native_mut().preScale1(x, y, z) };
+        self
+    }
+
     // helper
 
     #[allow(deprecated)]
@@ -781,7 +791,7 @@ impl Mul for &M44 {
     type Output = M44;
 
     fn mul(self, m: Self) -> Self::Output {
-        M44::concat(self, &m)
+        M44::concat(self, m)
     }
 }
 

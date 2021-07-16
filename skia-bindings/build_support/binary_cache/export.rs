@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use crate::build_support::binaries_config::BinariesConfiguration;
 use crate::build_support::binary_cache::{binaries, SKIA_LICENSE, SRC_BINDINGS_RS};
-use crate::build_support::skia::BinariesConfiguration;
 
 /// Publish the binaries to Azure.
 pub fn publish(binaries_config: &BinariesConfiguration, staging_directory: &Path) {
@@ -15,6 +15,6 @@ pub fn publish(binaries_config: &BinariesConfiguration, staging_directory: &Path
         (SRC_BINDINGS_RS, "bindings.rs"),
         (SKIA_LICENSE, "LICENSE_SKIA"),
     ];
-    binaries::export(&binaries_config, source_files, staging_directory)
+    binaries::export(binaries_config, source_files, staging_directory)
         .expect("EXPORTING BINARIES FAILED")
 }
