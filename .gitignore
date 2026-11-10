@@ -3,3 +3,7 @@ target/
 /.cargo/credentials
 /cmake-build-debug/
 .direnv/
+/tmp/
+.DS_Store
+
+/skia-bindings/bindings_docs.rs

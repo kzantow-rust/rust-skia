@@ -9,12 +9,7 @@ pub struct ISize {
     pub height: i32,
 }
 
-impl NativeTransmutable<SkISize> for ISize {}
-
-#[test]
-fn test_isize_layout() {
-    ISize::test_layout()
-}
+native_transmutable!(SkISize, ISize);
 
 impl ISize {
     pub const fn new(w: i32, h: i32) -> ISize {
@@ -32,14 +27,17 @@ impl ISize {
         *self = Self::new(w, h);
     }
 
+    /// Returns true iff `width == 0 && height == 0`.
     pub fn is_zero(self) -> bool {
         self.width == 0 && self.height == 0
     }
 
+    /// Returns true if either width or height are `<= 0`.
     pub fn is_empty(self) -> bool {
         self.width <= 0 || self.height <= 0
     }
 
+    /// Sets the width and height to `0`.
     pub fn set_empty(&mut self) {
         *self = Self::new_empty();
     }
@@ -62,12 +60,7 @@ pub struct Size {
     pub height: scalar,
 }
 
-impl NativeTransmutable<SkSize> for Size {}
-
-#[test]
-fn test_size_layout() {
-    Size::test_layout()
-}
+native_transmutable!(SkSize, Size);
 
 impl Size {
     pub const fn new(w: scalar, h: scalar) -> Size {
@@ -77,11 +70,11 @@ impl Size {
         }
     }
 
-    pub fn from_isize(src: ISize) -> Size {
+    pub const fn from_isize(src: ISize) -> Size {
         Self::new(src.width as _, src.height as _)
     }
 
-    pub fn new_empty() -> Self {
+    pub const fn new_empty() -> Self {
         Self::new(0.0, 0.0)
     }
 
@@ -89,14 +82,17 @@ impl Size {
         *self = Self::new(w, h);
     }
 
+    /// Returns true iff `width == 0 && height == 0`.
     pub fn is_zero(self) -> bool {
         self.width == 0.0 && self.height == 0.0
     }
 
+    /// Returns true if either width or height are `<= 0`.
     pub fn is_empty(self) -> bool {
         self.width <= 0.0 || self.height <= 0.0
     }
 
+    /// Sets the width and height to `0`.
     pub fn set_empty(&mut self) {
         *self = Self::new_empty()
     }

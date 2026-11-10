@@ -1,7 +1,5 @@
-use crate::prelude::*;
-use crate::Data;
-use skia_bindings as sb;
-use skia_bindings::SkFlattenable;
+use crate::{Data, prelude::*};
+use skia_bindings::{self as sb, SkFlattenable};
 use std::ffi::CStr;
 
 // TODO: getFactory()?
@@ -10,6 +8,8 @@ use std::ffi::CStr;
 // TODO: Register()?
 // TODO: getFlattenableType()?
 // TODO: serialize() with SkSerialProcs?
+
+require_type_equality!(sb::SkFlattenable_INHERITED, sb::SkRefCnt);
 
 pub trait Flattenable: Sized {
     fn type_name(&self) -> &CStr;

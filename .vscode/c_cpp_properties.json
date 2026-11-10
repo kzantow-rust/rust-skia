@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/skia-bindings/skia/**"
+            ],
+            "defines": [
+                "SK_GANESH",
+                "SK_USING_THIRD_PARTY_ICU",
+                "SK_SHAPER_UNICODE_AVAILABLE",
+                "SK_UNICODE_ICU_IMPLEMENTATION",
+                "SK_SHAPER_HARFBUZZ_AVAILABLE",
+                "SK_SHAPER_CORETEXT_AVAILABLE",
+                "SK_CODEC_DECODES_WEBP"
+            ],
+            "compilerPath": "/usr/bin/clang++",
+            "intelliSenseMode": "macos-clang-arm64",
+            "macFrameworkPath": [],
+            "cppStandard": "c++20"
+        }
+    ],
+    "version": 4
+}

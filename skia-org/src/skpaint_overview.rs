@@ -1,12 +1,13 @@
-use crate::{resources, DrawingDriver};
-use skia_safe::{
-    color_filters, corner_path_effect, dash_path_effect, discrete_path_effect, gradient_shader,
-    line_2d_path_effect, paint, path_1d_path_effect, path_2d_path_effect, perlin_noise_shader,
-    scalar, shaders, table_color_filter, AutoCanvasRestore, BlendMode, BlurStyle, Canvas, Color,
-    Font, MaskFilter, Matrix, Paint, Path, PathEffect, Point, Rect, SamplingOptions, TextBlob,
-    TileMode, Typeface,
-};
 use std::path;
+
+use skia_safe::{
+    AutoCanvasRestore, BlendMode, BlurStyle, Canvas, Color, Color4f, Font, MaskFilter, Matrix,
+    Paint, Path, PathBuilder, PathEffect, Point, Rect, SamplingOptions, TextBlob, TileMode,
+    color_filters, corner_path_effect, dash_path_effect, discrete_path_effect, gradient,
+    line_2d_path_effect, paint, path_1d_path_effect, path_2d_path_effect, scalar, shaders,
+};
+
+use crate::{DrawingDriver, helper::default_typeface, resources};
 
 pub fn draw(driver: &mut impl DrawingDriver, path: &path::Path) {
     let path = &path.join("SkPaint-Overview");
@@ -51,7 +52,7 @@ pub fn draw(driver: &mut impl DrawingDriver, path: &path::Path) {
     driver.draw_image_256(path, "22-sum-path-effect", draw_sum_path_effect);
 }
 
-fn draw_three_paints(canvas: &mut Canvas) {
+fn draw_three_paints(canvas: &Canvas) {
     let (paint1, paint2, paint3) = (
         &mut Paint::default(),
         &mut Paint::default(),
@@ -75,12 +76,12 @@ fn draw_three_paints(canvas: &mut Canvas) {
 
     let blob1 = TextBlob::from_str(
         "Skia!",
-        &Font::from_typeface_with_params(Typeface::default(), 64.0, 1.0, 0.0),
+        &Font::from_typeface_with_params(default_typeface(), 64.0, 1.0, 0.0),
     )
     .unwrap();
     let blob2 = TextBlob::from_str(
         "Skia!",
-        &Font::from_typeface_with_params(Typeface::default(), 64.0, 1.5, 0.0),
+        &Font::from_typeface_with_params(default_typeface(), 64.0, 1.5, 0.0),
     )
     .unwrap();
 
@@ -91,7 +92,7 @@ fn draw_three_paints(canvas: &mut Canvas) {
         .draw_text_blob(&blob2, (20.0, 224.0), paint3);
 }
 
-fn draw_fill_and_stroke(canvas: &mut Canvas) {
+fn draw_fill_and_stroke(canvas: &Canvas) {
     let fill_paint = &mut Paint::default();
     let stroke_paint = &mut Paint::default();
     stroke_paint
@@ -105,7 +106,7 @@ fn draw_fill_and_stroke(canvas: &mut Canvas) {
     stroke_paint.set_stroke_width(5.0);
     canvas.draw_oval(Rect::from_point_and_size((150, 10), (60, 20)), stroke_paint);
 
-    let blob = TextBlob::from_str("SKIA", &Font::from_typeface(Typeface::default(), 80.0)).unwrap();
+    let blob = TextBlob::from_str("SKIA", &Font::from_typeface(default_typeface(), 80.0)).unwrap();
 
     fill_paint.set_color(Color::from_argb(0xFF, 0xFF, 0x00, 0x00));
     canvas.draw_text_blob(&blob, (20, 120), fill_paint);
@@ -114,24 +115,19 @@ fn draw_fill_and_stroke(canvas: &mut Canvas) {
     canvas.draw_text_blob(&blob, (20, 220), fill_paint);
 }
 
-fn draw_gradient(canvas: &mut Canvas) {
+fn draw_gradient(canvas: &Canvas) {
     let points: (Point, Point) = ((0.0, 0.0).into(), (256.0, 256.0).into());
-    let colors = [Color::BLUE, Color::YELLOW];
+    let colors: [Color4f; 2] = [Color::BLUE.into(), Color::YELLOW.into()];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let paint = &mut Paint::default();
 
-    paint.set_shader(gradient_shader::linear(
-        points,
-        colors.as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
-        None,
-    ));
+    paint.set_shader(gradient::shaders::linear_gradient(points, &gradient, None));
     canvas.draw_paint(paint);
 }
 
-fn draw_transfer_modes(canvas: &mut Canvas) {
-    fn draw_str(c: &mut Canvas, text: &str, x: scalar, y: scalar, font: &Font, paint: &Paint) {
+fn draw_transfer_modes(canvas: &Canvas) {
+    fn draw_str(c: &Canvas, text: &str, x: scalar, y: scalar, font: &Font, paint: &Paint) {
         c.draw_text_blob(TextBlob::from_str(text, font).unwrap(), (x, y), paint);
     }
 
@@ -173,26 +169,31 @@ fn draw_transfer_modes(canvas: &mut Canvas) {
         &mut Paint::default(),
     );
     stroke.set_style(paint::Style::Stroke);
-    let font = &Font::from_typeface(Typeface::default(), 24.0);
+    let font = &Font::from_typeface(default_typeface(), 24.0);
     let src_points: (Point, Point) = ((0.0, 0.0).into(), (64.0, 0.0).into());
-    let src_colors = [Color::MAGENTA & 0x00_FF_FF_FF, Color::MAGENTA];
-    src.set_shader(gradient_shader::linear(
+    let src_colors: [Color4f; 2] = [
+        (Color::MAGENTA & 0x00_FF_FF_FF).into(),
+        Color::MAGENTA.into(),
+    ];
+    let src_gradient_colors =
+        gradient::Colors::new_evenly_spaced(&src_colors, TileMode::Clamp, None);
+    let src_gradient =
+        gradient::Gradient::new(src_gradient_colors, gradient::Interpolation::default());
+    src.set_shader(gradient::shaders::linear_gradient(
         src_points,
-        src_colors.as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
+        &src_gradient,
         None,
     ));
 
     let dst_points: (Point, Point) = ((0.0, 0.0).into(), (0.0, 64.0).into());
-    let dst_colors = [Color::CYAN & 0x00_FF_FF_FF, Color::CYAN];
-    dst.set_shader(gradient_shader::linear(
+    let dst_colors: [Color4f; 2] = [(Color::CYAN & 0x00_FF_FF_FF).into(), Color::CYAN.into()];
+    let dst_gradient_colors =
+        gradient::Colors::new_evenly_spaced(&dst_colors, TileMode::Clamp, None);
+    let dst_gradient =
+        gradient::Gradient::new(dst_gradient_colors, gradient::Interpolation::default());
+    dst.set_shader(gradient::shaders::linear_gradient(
         dst_points,
-        dst_colors.as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
+        &dst_gradient,
         None,
     ));
     canvas.clear(Color::WHITE);
@@ -214,7 +215,7 @@ fn draw_transfer_modes(canvas: &mut Canvas) {
     }
 }
 
-fn draw_bitmap_shader(canvas: &mut Canvas) {
+fn draw_bitmap_shader(canvas: &Canvas) {
     let image = resources::color_wheel();
 
     canvas.clear(Color::WHITE);
@@ -229,93 +230,80 @@ fn draw_bitmap_shader(canvas: &mut Canvas) {
     canvas.draw_paint(paint);
 }
 
-fn draw_radial_gradient_shader(canvas: &mut Canvas) {
-    let colors = [Color::BLUE, Color::YELLOW];
+fn draw_radial_gradient_shader(canvas: &Canvas) {
+    let colors: [Color4f; 2] = [Color::BLUE.into(), Color::YELLOW.into()];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let mut paint = Paint::default();
-    paint.set_shader(gradient_shader::radial(
-        (128.0, 128.0),
-        180.0,
-        colors.as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
+    paint.set_shader(gradient::shaders::radial_gradient(
+        ((128.0, 128.0), 180.0),
+        &gradient,
         None,
     ));
     canvas.draw_paint(&paint);
 }
 
-fn draw_two_point_conical_shader(canvas: &mut Canvas) {
-    let colors = [Color::BLUE, Color::YELLOW];
+fn draw_two_point_conical_shader(canvas: &Canvas) {
+    let colors: [Color4f; 2] = [Color::BLUE.into(), Color::YELLOW.into()];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let paint = &mut Paint::default();
-    paint.set_shader(gradient_shader::two_point_conical(
-        (128.0, 128.0),
-        128.0,
-        (128.0, 16.0),
-        16.0,
-        colors.as_ref(),
-        None,
-        TileMode::Clamp,
-        None,
-        None,
-    ));
-    canvas.draw_paint(&paint);
-}
-
-fn draw_sweep_gradient_shader(canvas: &mut Canvas) {
-    let colors = [Color::CYAN, Color::MAGENTA, Color::YELLOW, Color::CYAN];
-    let paint = &mut Paint::default();
-    paint.set_shader(gradient_shader::sweep(
-        (128.0, 128.0),
-        colors.as_ref(),
-        None,
-        TileMode::default(),
-        None,
-        None,
+    paint.set_shader(gradient::shaders::two_point_conical_gradient(
+        ((128.0, 128.0), 128.0),
+        ((128.0, 16.0), 16.0),
+        &gradient,
         None,
     ));
     canvas.draw_paint(paint);
 }
 
-fn draw_fractal_perlin_noise_shader(canvas: &mut Canvas) {
+fn draw_sweep_gradient_shader(canvas: &Canvas) {
+    let colors: [Color4f; 4] = [
+        Color::CYAN.into(),
+        Color::MAGENTA.into(),
+        Color::YELLOW.into(),
+        Color::CYAN.into(),
+    ];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::default(), None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    let paint = &mut Paint::default();
+    paint.set_shader(gradient::shaders::sweep_gradient(
+        (128.0, 128.0),
+        (0.0, 360.0),
+        &gradient,
+        None,
+    ));
+    canvas.draw_paint(paint);
+}
+
+fn draw_fractal_perlin_noise_shader(canvas: &Canvas) {
     canvas.clear(Color::WHITE);
     let paint = &mut Paint::default();
-    paint.set_shader(perlin_noise_shader::fractal_noise(
-        (0.05, 0.05),
-        4,
-        0.0,
-        None,
-    ));
+    paint.set_shader(shaders::fractal_noise((0.05, 0.05), 4, 0.0, None));
     canvas.draw_paint(paint);
 }
 
-fn draw_turbulence_perlin_noise_shader(canvas: &mut Canvas) {
+fn draw_turbulence_perlin_noise_shader(canvas: &Canvas) {
     canvas.clear(Color::WHITE);
     let paint = &mut Paint::default();
-    paint.set_shader(perlin_noise_shader::turbulence((0.05, 0.05), 4, 0.0, None));
+    paint.set_shader(shaders::turbulence((0.05, 0.05), 4, 0.0, None));
     canvas.draw_paint(paint);
 }
 
-fn draw_compose_shader(canvas: &mut Canvas) {
-    let colors = [Color::BLUE, Color::YELLOW];
+fn draw_compose_shader(canvas: &Canvas) {
+    let colors: [Color4f; 2] = [Color::BLUE.into(), Color::YELLOW.into()];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
+    let gradient = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
     let paint = &mut Paint::default();
     paint.set_shader(shaders::blend(
         BlendMode::Difference,
-        gradient_shader::radial(
-            (128.0, 128.0),
-            180.0,
-            colors.as_ref(),
-            None,
-            TileMode::Clamp,
-            None,
-            None,
-        )
-        .unwrap(),
-        perlin_noise_shader::turbulence((0.025, 0.025), 2, 0.0, None).unwrap(),
+        gradient::shaders::radial_gradient(((128.0, 128.0), 180.0), &gradient, None).unwrap(),
+        shaders::turbulence((0.025, 0.025), 2, 0.0, None).unwrap(),
     ));
     canvas.draw_paint(paint);
 }
 
-fn draw_mask_filter(canvas: &mut Canvas) {
+fn draw_mask_filter(canvas: &Canvas) {
     // TODO: make BlendMode optional in draw_color.
     canvas.draw_color(
         Color::from_argb(0xFF, 0xFF, 0xFF, 0xFF),
@@ -323,15 +311,14 @@ fn draw_mask_filter(canvas: &mut Canvas) {
     );
     let paint = &mut Paint::default();
     paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 5.0, None));
-    let blob =
-        TextBlob::from_str("Skia", &Font::from_typeface(Typeface::default(), 120.0)).unwrap();
+    let blob = TextBlob::from_str("Skia", &Font::from_typeface(default_typeface(), 120.0)).unwrap();
     canvas.draw_text_blob(blob, (0, 160), paint);
 }
 
-fn draw_color_filter(c: &mut Canvas) {
-    fn f(c: &mut Canvas, (x, y): (scalar, scalar), color_matrix: &[scalar; 20]) {
+fn draw_color_filter(c: &Canvas) {
+    fn f(c: &Canvas, (x, y): (scalar, scalar), color_matrix: &[scalar; 20]) {
         let paint = &mut Paint::default();
-        paint.set_color_filter(color_filters::matrix_row_major(color_matrix));
+        paint.set_color_filter(color_filters::matrix_row_major(color_matrix, None));
 
         let image = &resources::mandrill();
 
@@ -352,28 +339,24 @@ fn draw_color_filter(c: &mut Canvas) {
     f(c, (512.0, 0.0), &grayscale);
 }
 
-fn draw_color_table_color_filter(canvas: &mut Canvas) {
+fn draw_color_table_color_filter(canvas: &Canvas) {
     let image = resources::mandrill();
 
     canvas.scale((0.5, 0.5));
     let ct = &mut [0u8; 256];
     for (i, v) in ct.iter_mut().enumerate() {
         let x = (i as i32 - 96) * 255 / 64;
-        *v = x.max(0).min(255) as _;
+        *v = x.clamp(0, 255) as _;
     }
     let mut paint = Paint::default();
-    paint.set_color_filter(table_color_filter::from_argb(
-        None,
-        Some(ct),
-        Some(ct),
-        Some(ct),
-    ));
+    let ct: &_ = ct;
+    paint.set_color_filter(color_filters::table_argb(None, ct, ct, ct));
     canvas.draw_image(&image, (0, 0), Some(&paint));
 }
 
-fn draw_path_2d_effect(canvas: &mut Canvas) {
+fn draw_path_2d_effect(canvas: &Canvas) {
     let scale = 10.0;
-    let path = &mut Path::default();
+    let mut path = PathBuilder::new();
     let pts: [i8; 28] = [
         2, 2, 1, 3, 0, 3, 2, 1, 3, 1, 4, 0, 4, 1, 5, 1, 4, 2, 4, 3, 2, 5, 2, 4, 3, 3, 2, 3,
     ];
@@ -388,14 +371,14 @@ fn draw_path_2d_effect(canvas: &mut Canvas) {
     let matrix = &Matrix::scale((4.0 * scale, 4.0 * scale));
     let paint = &mut Paint::default();
     paint
-        .set_path_effect(path_2d_path_effect::new(matrix, path))
+        .set_path_effect(path_2d_path_effect::new(matrix, &path.detach()))
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
     let bounds = Rect::new(-4.0 * scale, -4.0 * scale, 256.0, 256.0);
     canvas.draw_rect(bounds, paint);
 }
 
-fn draw_line_2d_effect(canvas: &mut Canvas) {
+fn draw_line_2d_effect(canvas: &Canvas) {
     let paint = &mut Paint::default();
     let lattice = &mut Matrix::default();
     lattice.set_scale((8.0, 8.0), None).pre_rotate(30.0, None);
@@ -407,13 +390,12 @@ fn draw_line_2d_effect(canvas: &mut Canvas) {
     canvas.draw_rect(bounds, paint);
 }
 
-fn draw_path_1d_effect(canvas: &mut Canvas) {
+fn draw_path_1d_effect(canvas: &Canvas) {
     let paint = &mut Paint::default();
-    let path = &mut Path::default();
-    path.add_oval(Rect::from_size((16.0, 6.0)), None);
+    let path = Path::oval(Rect::from_size((16.0, 6.0)), None);
     paint
         .set_path_effect(path_1d_path_effect::new(
-            path,
+            &path,
             32.0,
             0.0,
             path_1d_path_effect::Style::Rotate,
@@ -423,31 +405,44 @@ fn draw_path_1d_effect(canvas: &mut Canvas) {
     canvas.draw_circle((128.0, 128.0), 122.0, paint);
 }
 
-fn star() -> Path {
+/// Builds the star that the path effect examples stroke.
+///
+/// The path starts at a point on a circle and adds `line_count` lines, each turning by the same
+/// angle around the circle's center. When `close` is true, a closing line returns to the start
+/// point. The corner path effect example draws 6 lines and closes the star. The other examples draw
+/// 7 lines, which end at the start point, and leave the star open.
+fn star(line_count: i32, close: bool) -> Path {
     const R: scalar = 115.2;
     const C: scalar = 128.0;
-    let mut path = Path::default();
+    let mut path = PathBuilder::new();
     path.move_to((C + R, C));
-    for i in 1..8 {
+    for i in 1..=line_count {
         #[allow(clippy::excessive_precision)]
         let a = 2.692_793_7 * i as scalar;
         path.line_to((C + R * a.cos(), C + R * a.sin()));
     }
-    path.close();
-    path
+    if close {
+        path.close();
+    }
+    path.detach()
 }
 
-fn draw_corner_path_effect(canvas: &mut Canvas) {
+/// The star that the dash, discrete, compose, and sum path effect examples stroke.
+fn open_star() -> Path {
+    star(7, false)
+}
+
+fn draw_corner_path_effect(canvas: &Canvas) {
     let paint = &mut Paint::default();
     paint
         .set_path_effect(corner_path_effect::new(32.0))
         .set_style(paint::Style::Stroke)
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
-    canvas.draw_path(&star(), paint);
+    canvas.draw_path(&star(6, true), paint);
 }
 
-fn draw_dash_path_effect(canvas: &mut Canvas) {
+fn draw_dash_path_effect(canvas: &Canvas) {
     const INTERVALS: [scalar; 4] = [10.0, 5.0, 2.0, 5.0];
     let paint = &mut Paint::default();
     paint
@@ -456,10 +451,10 @@ fn draw_dash_path_effect(canvas: &mut Canvas) {
         .set_stroke_width(2.0)
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
-    canvas.draw_path(&star(), paint);
+    canvas.draw_path(&open_star(), paint);
 }
 
-fn draw_discrete_path_effect(canvas: &mut Canvas) {
+fn draw_discrete_path_effect(canvas: &Canvas) {
     let paint = &mut Paint::default();
     paint
         .set_path_effect(discrete_path_effect::new(10.0, 4.0, None))
@@ -467,10 +462,10 @@ fn draw_discrete_path_effect(canvas: &mut Canvas) {
         .set_stroke_width(2.0)
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
-    canvas.draw_path(&star(), paint);
+    canvas.draw_path(&open_star(), paint);
 }
 
-fn draw_compose_path_effect(canvas: &mut Canvas) {
+fn draw_compose_path_effect(canvas: &Canvas) {
     const INTERVALS: [scalar; 4] = [10.0, 5.0, 2.0, 5.0];
     let paint = &mut Paint::default();
     paint
@@ -482,10 +477,10 @@ fn draw_compose_path_effect(canvas: &mut Canvas) {
         .set_stroke_width(2.0)
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
-    canvas.draw_path(&star(), paint);
+    canvas.draw_path(&open_star(), paint);
 }
 
-fn draw_sum_path_effect(canvas: &mut Canvas) {
+fn draw_sum_path_effect(canvas: &Canvas) {
     let paint = &mut Paint::default();
     paint
         .set_path_effect(PathEffect::sum(
@@ -496,5 +491,5 @@ fn draw_sum_path_effect(canvas: &mut Canvas) {
         .set_stroke_width(2.0)
         .set_anti_alias(true);
     canvas.clear(Color::WHITE);
-    canvas.draw_path(&star(), paint);
+    canvas.draw_path(&open_star(), paint);
 }

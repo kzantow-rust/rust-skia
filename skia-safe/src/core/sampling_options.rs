@@ -1,12 +1,15 @@
-use crate::{prelude::*, FilterQuality};
-use skia_bindings::{SkCubicResampler, SkSamplingOptions, SkSamplingOptions_MediumBehavior};
+//! Options for sampling images: filter mode, mipmap mode, and cubic resampler.
+
+use skia_bindings::{SkCubicResampler, SkSamplingOptions};
 
 pub use skia_bindings::SkFilterMode as FilterMode;
+variant_name!(FilterMode::Linear);
 
 #[deprecated(since = "0.38.0", note = "Use FilterMode")]
 pub type SamplingMode = FilterMode;
 
 pub use skia_bindings::SkMipmapMode as MipmapMode;
+variant_name!(MipmapMode::Nearest);
 
 /// Specify `b` and `c` (each between 0...1) to create a shader that applies the corresponding
 /// cubic reconstruction filter to the image.
@@ -19,9 +22,9 @@ pub use skia_bindings::SkMipmapMode as MipmapMode;
 ///         Don P. Mitchell
 ///         Arun N. Netravali
 ///         1988
-/// https://www.cs.utexas.edu/~fussell/courses/cs384g-fall2013/lectures/mitchell/Mitchell.pdf
-/// Desmos worksheet https://www.desmos.com/calculator/aghdpicrvr
-/// Nice overview https://entropymine.com/imageworsener/bicubic/
+/// <https://www.cs.utexas.edu/~fussell/courses/cs384g-fall2013/lectures/mitchell/Mitchell.pdf>
+/// Desmos worksheet <https://www.desmos.com/calculator/aghdpicrvr>
+/// Nice overview <https://entropymine.com/imageworsener/bicubic/>
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct CubicResampler {
@@ -45,7 +48,7 @@ impl CubicResampler {
     }
 }
 
-impl NativeTransmutable<SkCubicResampler> for CubicResampler {}
+native_transmutable!(SkCubicResampler, CubicResampler);
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[deprecated(since = "0.38.0", note = "Use SamplingOptions")]
@@ -54,30 +57,22 @@ pub struct FilterOptions {
     pub mipmap: MipmapMode,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-#[repr(i32)]
-pub enum MediumBehavior {
-    AsMipmapNearest = SkSamplingOptions_MediumBehavior::kMedium_asMipmapNearest as _,
-    AsMipmapLinear = SkSamplingOptions_MediumBehavior::kMedium_asMipmapLinear as _,
-}
-
-impl NativeTransmutable<SkSamplingOptions_MediumBehavior> for MediumBehavior {}
-
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
-#[allow(deprecated)]
 pub struct SamplingOptions {
+    pub max_aniso: i32,
     pub use_cubic: bool,
     pub cubic: CubicResampler,
     pub filter: FilterMode,
     pub mipmap: MipmapMode,
 }
 
-impl NativeTransmutable<SkSamplingOptions> for SamplingOptions {}
+native_transmutable!(SkSamplingOptions, SamplingOptions);
 
 impl Default for SamplingOptions {
     fn default() -> Self {
         Self {
+            max_aniso: 0,
             use_cubic: false,
             // ignored
             cubic: CubicResampler { b: 0.0, c: 0.0 },
@@ -95,30 +90,13 @@ impl SamplingOptions {
             ..Default::default()
         }
     }
-
-    pub fn from_filter_quality(
-        filter_quality: FilterQuality,
-        medium_behavior: impl Into<Option<MediumBehavior>>,
-    ) -> Self {
-        Self::from_native_c(unsafe {
-            SkSamplingOptions::new(
-                filter_quality,
-                medium_behavior
-                    .into()
-                    .unwrap_or(MediumBehavior::AsMipmapNearest)
-                    .into_native(),
-            )
-        })
-    }
 }
 
 impl From<FilterMode> for SamplingOptions {
     fn from(fm: FilterMode) -> Self {
         Self {
-            use_cubic: false,
-            cubic: CubicResampler { b: 0.0, c: 0.0 },
             filter: fm,
-            mipmap: MipmapMode::None,
+            ..Default::default()
         }
     }
 }
@@ -127,10 +105,9 @@ impl From<FilterMode> for SamplingOptions {
 impl From<FilterOptions> for SamplingOptions {
     fn from(filter: FilterOptions) -> Self {
         Self {
-            use_cubic: false,
-            cubic: CubicResampler { b: 0.0, c: 0.0 },
             filter: filter.sampling,
             mipmap: filter.mipmap,
+            ..Default::default()
         }
     }
 }
@@ -146,26 +123,15 @@ impl From<CubicResampler> for SamplingOptions {
     }
 }
 
-impl From<FilterQuality> for SamplingOptions {
-    fn from(quality: FilterQuality) -> Self {
-        Self::from_filter_quality(quality, None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::prelude::NativeTransmutable;
-
-    #[test]
-    fn test_naming() {
-        let _ = super::FilterMode::Linear;
-        let _ = super::MipmapMode::Nearest;
+impl SamplingOptions {
+    pub fn from_aniso(max_aniso: i32) -> Self {
+        Self {
+            max_aniso: max_aniso.max(1),
+            ..Default::default()
+        }
     }
 
-    #[test]
-    fn test_layout() {
-        super::CubicResampler::test_layout();
-        super::MediumBehavior::test_layout();
-        super::SamplingOptions::test_layout()
+    pub fn is_aniso(&self) -> bool {
+        self.max_aniso != 0
     }
 }

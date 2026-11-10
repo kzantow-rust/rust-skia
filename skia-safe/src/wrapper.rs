@@ -1,7 +1,7 @@
-///! FFI interoperability for skia-safe's wrapper types.
-///!
-///! This module is only meant to be used by external code. Internal code should continue to use the traits in
-///! the `prelude` module.
+//! FFI interoperability for skia-safe's wrapper types.
+//!
+//! This module is only meant to be used by external code. Internal code should continue to use the traits in
+//! the `prelude` module.
 use crate::prelude::*;
 
 /// This trait supports the conversion of a wrapper into it's wrapped C/C++ pointer and back.
@@ -26,6 +26,12 @@ where
     /// Access the wrapped pointer.
     fn inner(&self) -> &N;
     /// Access the wrapped pointer.
+    ///
+    /// Some native types store pointers into their own memory, and C++ writes through them.
+    /// Calling C++ functions that modify such a type through the returned reference is undefined
+    /// behavior in Rust, because a `&mut N` promises that nothing else writes to the object while
+    /// the reference exists. For these calls, use [`PointerWrapper::unwrap`] and
+    /// [`PointerWrapper::wrap`] to work with the raw pointer instead.
     fn inner_mut(&mut self) -> &mut N;
 }
 
@@ -141,7 +147,7 @@ where
 
 unsafe impl<N> PointerWrapper<N> for RefHandle<N>
 where
-    N: NativeDrop,
+    N: NativeDelete,
 {
     fn wrap(ptr: *mut N) -> Option<Self> {
         Self::from_ptr(ptr)
@@ -156,7 +162,7 @@ where
     }
 
     fn inner_mut(&mut self) -> &mut N {
-        self.native_mut()
+        unsafe { &mut *self.native_ptr() }
     }
 }
 

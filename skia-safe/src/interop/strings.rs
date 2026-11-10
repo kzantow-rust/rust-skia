@@ -6,8 +6,7 @@ use skia_bindings::{self as sb, SkStrings};
 use std::{fmt, ops::Index};
 
 pub type Strings = Handle<SkStrings>;
-unsafe impl Send for Strings {}
-unsafe impl Sync for Strings {}
+unsafe_send_sync!(Strings);
 
 impl NativeDrop for SkStrings {
     fn drop(&mut self) {
@@ -24,7 +23,7 @@ impl fmt::Debug for Strings {
 }
 
 impl Handle<SkStrings> {
-    /// Constructs a native Strings array from a slice of SkStrings by moving them.
+    /// Constructs a native `Strings` array from a slice of Rust `String`s by moving them.
     pub fn new(mut strings: Vec<String>) -> Self {
         Strings::construct(|s| unsafe {
             sb::C_SkStrings_construct(s, strings.native_mut().as_mut_ptr(), strings.len())

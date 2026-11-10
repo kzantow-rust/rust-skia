@@ -1,10 +1,11 @@
-use crate::prelude::*;
+//! A 5x4 matrix for transforming colors, used to create color filters.
+
+use crate::{YUVColorSpace, prelude::*};
 use skia_bindings::{self as sb, SkColorMatrix};
 use std::fmt;
 
 pub type ColorMatrix = Handle<SkColorMatrix>;
-unsafe impl Send for ColorMatrix {}
-unsafe impl Sync for ColorMatrix {}
+unsafe_send_sync!(ColorMatrix);
 
 impl NativeDrop for SkColorMatrix {
     fn drop(&mut self) {}
@@ -16,7 +17,7 @@ impl PartialEq for ColorMatrix {
         let mut array_other = [0.0f32; 20];
         self.get_row_major(&mut array_self);
         other.get_row_major(&mut array_other);
-        array_self.eq(&array_other)
+        array_self == array_other
     }
 }
 
@@ -64,6 +65,14 @@ impl ColorMatrix {
                 m31, m32, m33, m34,
             )
         })
+    }
+
+    pub fn rgb_to_yuv(rgb: YUVColorSpace) -> Self {
+        Self::from_native_c(unsafe { sb::SkColorMatrix_RGBtoYUV(rgb) })
+    }
+
+    pub fn yuv_to_rgb(yuv: YUVColorSpace) -> Self {
+        Self::from_native_c(unsafe { sb::SkColorMatrix_YUVtoRGB(yuv) })
     }
 
     pub fn set_identity(&mut self) {

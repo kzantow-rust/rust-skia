@@ -1,56 +1,26 @@
-use crate::{
-    gradient_shader, prelude::*, scalar, Color, ColorFilter, Image, Matrix, NativeFlattenable,
-    Point, TileMode,
-};
-use skia_bindings::{self as sb, SkFlattenable, SkRefCntBase, SkShader};
+//! Specifies the source color(s) for what is being drawn. If a [`crate::Paint`] has no shader,
+//! the paint's color is used.
+
 use std::fmt;
 
-pub use skia_bindings::SkShader_GradientType as GradientTypeInternal;
-#[test]
-fn test_shader_gradient_type_naming() {
-    let _ = GradientTypeInternal::Linear;
-}
+use skia_bindings::{self as sb, SkFlattenable, SkRefCntBase, SkShader};
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum GradientType {
-    Color,
-    Linear(Point, Point),
-    Radial(Point, scalar),
-    Conical([(Point, scalar); 2]),
-    Sweep(Point),
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct GradientInfo<'a> {
-    pub colors: &'a [Color],
-    pub color_offsets: &'a [scalar],
-    pub tile_mode: TileMode,
-    pub gradient_flags: gradient_shader::Flags,
-}
-
-impl<'a> GradientInfo<'a> {
-    pub fn color_count(&self) -> usize {
-        self.colors.len()
-    }
-}
+use crate::{ColorFilter, ColorSpace, Image, Matrix, NativeFlattenable, TileMode, prelude::*};
 
 pub type Shader = RCHandle<SkShader>;
-unsafe impl Send for Shader {}
-unsafe impl Sync for Shader {}
+unsafe_send_sync!(Shader);
+require_type_equality!(sb::SkShader_INHERITED, SkFlattenable);
 
 impl NativeBase<SkRefCntBase> for SkShader {}
 impl NativeBase<SkFlattenable> for SkShader {}
 
 impl NativeRefCountedBase for SkShader {
     type Base = SkRefCntBase;
-    fn ref_counted_base(&self) -> &Self::Base {
-        self.base()
-    }
 }
 
 impl NativeFlattenable for SkShader {
     fn native_flattenable(&self) -> &SkFlattenable {
-        &self.base()
+        self.base()
     }
 
     fn native_deserialize(data: &[u8]) -> *mut Self {
@@ -73,11 +43,23 @@ impl fmt::Debug for Shader {
     }
 }
 
+/// Shaders specify the source color(s) for what is being drawn. If a paint
+/// has no shader, then the paint's color is used. If the paint has a
+/// shader, then the shader's color(s) are use instead, but they are
+/// modulated by the paint's alpha. This makes it easy to create a shader
+/// once (e.g. bitmap tiling or gradient) and then change its transparency
+/// without having to modify the original shader... only the paint's alpha needs
+/// to be modified.
 impl Shader {
+    /// Returns `true` if the shader is guaranteed to produce only opaque
+    /// colors, subject to the [`crate::Paint`] using the shader to apply an opaque
+    /// alpha value. Subclasses should override this to allow some
+    /// optimizations.
     pub fn is_opaque(&self) -> bool {
         unsafe { sb::C_SkShader_isOpaque(self.native()) }
     }
-
+    /// Returns iff this shader is backed by a single [`Image`].
+    /// If not, returns `None`.
     pub fn image(&self) -> Option<(Image, Matrix, (TileMode, TileMode))> {
         unsafe {
             let mut matrix = Matrix::default();
@@ -86,6 +68,7 @@ impl Shader {
                 self.native()
                     .isAImage(matrix.native_mut(), tile_mode.as_mut_ptr()),
             );
+            #[allow(clippy::tuple_array_conversions)]
             image.map(|i| (i, matrix, (tile_mode[0], tile_mode[1])))
         }
     }
@@ -94,6 +77,9 @@ impl Shader {
         unsafe { sb::C_SkShader_isAImage(self.native()) }
     }
 
+    /// Return a shader that will apply the specified `local_matrix` to this shader.
+    /// The specified matrix will be applied before any matrix associated with this shader.
+    #[must_use]
     pub fn with_local_matrix(&self, matrix: &Matrix) -> Self {
         Self::from_ptr(unsafe {
             sb::C_SkShader_makeWithLocalMatrix(self.native(), matrix.native())
@@ -101,18 +87,59 @@ impl Shader {
         .unwrap()
     }
 
+    /// Create a new shader that produces the same colors as invoking this shader and then applying
+    /// the color filter.
+    #[must_use]
     pub fn with_color_filter(&self, color_filter: impl Into<ColorFilter>) -> Self {
         Self::from_ptr(unsafe {
             sb::C_SkShader_makeWithColorFilter(self.native(), color_filter.into().into_ptr())
         })
         .unwrap()
     }
+
+    /// Return a shader that will compute this shader in a context such that any child shaders
+    /// return RGBA values converted to the `input_cs` colorspace.
+    ///
+    /// It is then assumed that the RGBA values returned by this shader have been transformed into
+    /// `output_cs` by the shader being wrapped.  By default, shaders are assumed to return values
+    /// in the destination colorspace and premultiplied. Using a different `output_cs` than `input_cs`
+    /// allows custom shaders to replace the color management Skia normally performs w/o forcing
+    /// authors to otherwise manipulate surface/image color info to avoid unnecessary or incorrect
+    /// work.
+    ///
+    /// If the shader is not performing colorspace conversion but needs to operate in the `input_cs`
+    /// then it should have `output_cs` be the same as `input_cs`. Regardless of the `output_cs` here,
+    /// the RGBA values of the returned [`Shader`] are always converted from `output_cs` to the
+    /// destination surface color space.
+    ///
+    /// A `None` `input_cs` is assumed to be the destination CS.
+    /// A `None` `output_cs` is assumed to be the `input_cs`.
+    #[must_use]
+    pub fn with_working_color_space(
+        &self,
+        input_cs: impl Into<Option<ColorSpace>>,
+        output_cs: impl Into<Option<ColorSpace>>,
+    ) -> Self {
+        Self::from_ptr(unsafe {
+            sb::C_SkShader_makeWithWorkingColorSpace(
+                self.native(),
+                input_cs.into().into_ptr_or_null(),
+                output_cs.into().into_ptr_or_null(),
+            )
+        })
+        .unwrap()
+    }
 }
 
 pub mod shaders {
-    use crate::prelude::*;
-    use crate::{BlendMode, Color, Color4f, ColorSpace, Matrix, Shader};
+    //! Factory functions for creating [`crate::Shader`]s, e.g. gradients, image shaders, and
+    //! Perlin noise.
     use skia_bindings as sb;
+
+    use crate::{
+        Blender, Color, Color4f, ColorSpace, Image, Matrix, Rect, SamplingOptions, Shader,
+        TileMode, prelude::*,
+    };
 
     pub fn empty() -> Shader {
         Shader::from_ptr(unsafe { sb::C_SkShaders_Empty() }).unwrap()
@@ -130,21 +157,66 @@ pub mod shaders {
         .unwrap()
     }
 
-    pub fn blend(mode: BlendMode, dst: impl Into<Shader>, src: impl Into<Shader>) -> Shader {
+    pub fn blend(
+        blender: impl Into<Blender>,
+        dst: impl Into<Shader>,
+        src: impl Into<Shader>,
+    ) -> Shader {
         Shader::from_ptr(unsafe {
-            sb::C_SkShaders_Blend(mode, dst.into().into_ptr(), src.into().into_ptr())
+            sb::C_SkShaders_Blend(
+                blender.into().into_ptr(),
+                dst.into().into_ptr(),
+                src.into().into_ptr(),
+            )
         })
         .unwrap()
     }
 
-    pub fn lerp(t: f32, dst: impl Into<Shader>, src: impl Into<Shader>) -> Option<Shader> {
+    pub fn coord_clamp(shader: impl Into<Shader>, rect: impl AsRef<Rect>) -> Option<Shader> {
         Shader::from_ptr(unsafe {
-            sb::C_SkShaders_Lerp(t, dst.into().into_ptr(), src.into().into_ptr())
+            sb::C_SkShaders_CoordClamp(shader.into().into_ptr(), rect.as_ref().native())
         })
     }
 
-    #[deprecated(since = "0.29.0", note = "removed without replacement")]
-    pub fn lerp2(_red: Shader, _dst: Shader, _src: Shader, _local_matrix: Option<&Matrix>) -> ! {
-        panic!("removed without replacement");
+    /// Create an [`Shader`] that will sample the 'image'. This is equivalent to [`Image::to_shader`].
+    pub fn image<'a>(
+        image: impl Into<Image>,
+        tm: (TileMode, TileMode),
+        options: &SamplingOptions,
+        matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Shader> {
+        Shader::from_ptr(unsafe {
+            sb::C_SkShaders_Image(
+                image.into().into_ptr(),
+                tm.0,
+                tm.1,
+                options.native(),
+                matrix.into().native_ptr_or_null(),
+            )
+        })
     }
+
+    /// Create an [`Shader`] that will sample 'image' with minimal processing. This is equivalent to
+    /// [`Image::to_raw_shader`].
+    pub fn raw_image<'a>(
+        image: impl Into<Image>,
+        tm: (TileMode, TileMode),
+        options: &SamplingOptions,
+        matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Shader> {
+        Shader::from_ptr(unsafe {
+            sb::C_SkShaders_RawImage(
+                image.into().into_ptr(),
+                tm.0,
+                tm.1,
+                options.native(),
+                matrix.into().native_ptr_or_null(),
+            )
+        })
+    }
+
+    // Re-export gradient shader factory functions from effects::gradient::shaders
+    pub use crate::effects::gradient::shaders::{
+        linear_gradient, radial_gradient, sweep_gradient, two_point_conical_gradient,
+    };
 }

@@ -1,15 +1,12 @@
-use crate::artifact;
-use crate::drivers::DrawingDriver;
-use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
-use ash::vk;
-use ash::vk::Handle;
-use ash::{Entry, Instance};
-use skia_safe::{gpu, Budgeted, Canvas, ImageInfo, Surface};
-use std::convert::TryInto;
-use std::ffi::CString;
-use std::os::raw;
-use std::path::Path;
-use std::ptr;
+use std::{ffi::CString, os::raw, path::Path, ptr};
+
+use ash::{
+    Entry, Instance,
+    vk::{self, Handle},
+};
+use skia_safe::{Canvas, ImageInfo, gpu};
+
+use crate::{Driver, artifact, drivers::DrawingDriver};
 
 #[allow(dead_code)]
 pub struct Vulkan {
@@ -19,8 +16,10 @@ pub struct Vulkan {
 }
 
 impl DrawingDriver for Vulkan {
-    const NAME: &'static str = "vulkan";
+    const DRIVER: Driver = Driver::Vulkan;
 
+    // Not sure why this is needed to satisfy clippy with 1.97.0
+    #[allow(unused)]
     fn new() -> Self {
         let ash_graphics = unsafe { AshGraphics::new("skia-org") };
         let context = {
@@ -35,7 +34,7 @@ impl DrawingDriver for Vulkan {
             };
 
             let backend_context = unsafe {
-                gpu::vk::BackendContext::new(
+                gpu::vk::BackendContext::new_builder(
                     ash_graphics.instance.handle().as_raw() as _,
                     ash_graphics.physical_device.as_raw() as _,
                     ash_graphics.device.handle().as_raw() as _,
@@ -44,10 +43,12 @@ impl DrawingDriver for Vulkan {
                         ash_graphics.queue_and_index.1,
                     ),
                     &get_proc,
+                    Some(AshGraphics::vulkan_version().unwrap_or((1, 1, 0)).into()),
                 )
+                .build()
             };
 
-            gpu::DirectContext::new_vulkan(&backend_context, None).unwrap()
+            gpu::direct_contexts::make_vulkan(&backend_context, None).unwrap()
         };
 
         Self {
@@ -61,17 +62,18 @@ impl DrawingDriver for Vulkan {
         (width, height): (i32, i32),
         path: &Path,
         name: &str,
-        func: impl Fn(&mut Canvas),
+        func: impl Fn(&Canvas),
     ) {
         let image_info = ImageInfo::new_n32_premul((width * 2, height * 2), None);
-        let mut surface = Surface::new_render_target(
+        let mut surface = gpu::surfaces::render_target(
             &mut self.context,
-            Budgeted::Yes,
+            gpu::Budgeted::Yes,
             &image_info,
             None,
             gpu::SurfaceOrigin::TopLeft,
             None,
             false,
+            None,
         )
         .unwrap();
 
@@ -79,6 +81,7 @@ impl DrawingDriver for Vulkan {
     }
 }
 
+#[allow(unused)]
 pub struct AshGraphics {
     pub entry: Entry,
     pub instance: Instance,
@@ -100,28 +103,30 @@ impl Drop for AshGraphics {
 // most code copied from here: https://github.com/MaikKlein/ash/blob/master/examples/src/lib.rs
 impl AshGraphics {
     pub fn vulkan_version() -> Option<(usize, usize, usize)> {
-        let entry = unsafe { Entry::new() }.unwrap();
+        let entry = unsafe { Entry::load() }.unwrap();
 
-        let detected_version = entry.try_enumerate_instance_version().unwrap_or(None);
+        let detected_version = unsafe { entry.try_enumerate_instance_version().unwrap_or(None) };
 
         detected_version.map(|ver| {
             (
-                vk::version_major(ver).try_into().unwrap(),
-                vk::version_minor(ver).try_into().unwrap(),
-                vk::version_patch(ver).try_into().unwrap(),
+                vk::api_version_major(ver).try_into().unwrap(),
+                vk::api_version_minor(ver).try_into().unwrap(),
+                vk::api_version_patch(ver).try_into().unwrap(),
             )
         })
     }
 
     pub unsafe fn new(app_name: &str) -> AshGraphics {
-        let entry = Entry::new().unwrap();
+        let entry = unsafe { Entry::load() }.unwrap();
 
-        let minimum_version = vk::make_version(1, 0, 0);
+        // Minimum version supported by Skia.
+        let minimum_version = vk::make_api_version(0, 1, 1, 0);
 
         let instance: Instance = {
             let api_version = Self::vulkan_version()
                 .map(|(major, minor, patch)| {
-                    vk::make_version(
+                    vk::make_api_version(
+                        0,
                         major.try_into().unwrap(),
                         minor.try_into().unwrap(),
                         patch.try_into().unwrap(),
@@ -130,10 +135,15 @@ impl AshGraphics {
                 .unwrap_or(minimum_version);
 
             let app_name = CString::new(app_name).unwrap();
-            let layer_names: [&CString; 0] = []; // [CString::new("VK_LAYER_LUNARG_standard_validation").unwrap()];
-            let extension_names_raw = []; // extension_names();
+            let layer_names: [&CString; 0] = [];
+            // let layer_names: [&CString; 1] = [&CString::new("VK_LAYER_LUNARG_standard_validation").unwrap()];
+            let extension_names_raw = [
+                // These extensions are needed to support MoltenVK on macOS.
+                vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME.as_ptr(),
+                vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr(),
+            ];
 
-            let app_info = vk::ApplicationInfo::builder()
+            let app_info = vk::ApplicationInfo::default()
                 .application_name(&app_name)
                 .application_version(0)
                 .engine_name(&app_name)
@@ -145,40 +155,42 @@ impl AshGraphics {
                 .map(|raw_name| raw_name.as_ptr())
                 .collect();
 
-            let create_info = vk::InstanceCreateInfo::builder()
+            let create_info = vk::InstanceCreateInfo::default()
                 .application_info(&app_info)
                 .enabled_layer_names(&layers_names_raw)
-                .enabled_extension_names(&extension_names_raw);
+                .enabled_extension_names(&extension_names_raw)
+                // Flag is needed to support MoltenVK on macOS.
+                .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
 
-            entry
-                .create_instance(&create_info, None)
-                .expect("Failed to create a Vulkan instance.")
+            unsafe {
+                entry
+                    .create_instance(&create_info, None)
+                    .expect("Failed to create a Vulkan instance")
+            }
         };
 
         let (physical_device, queue_family_index) = {
-            let physical_devices = instance
-                .enumerate_physical_devices()
-                .expect("Failed to enumerate Vulkan physical devices.");
+            let physical_devices = unsafe {
+                instance
+                    .enumerate_physical_devices()
+                    .expect("Failed to enumerate Vulkan physical devices")
+            };
 
             physical_devices
                 .iter()
-                .map(|physical_device| {
+                .map(|physical_device| unsafe {
                     instance
                         .get_physical_device_queue_family_properties(*physical_device)
                         .iter()
                         .enumerate()
-                        .find_map(|(index, ref info)| {
+                        .find_map(|(index, info)| {
                             let supports_graphic =
                                 info.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-                            if supports_graphic {
-                                Some((*physical_device, index))
-                            } else {
-                                None
-                            }
+                            supports_graphic.then_some((*physical_device, index))
                         })
                 })
                 .find_map(|v| v)
-                .expect("Failed to find a suitable Vulkan device.")
+                .expect("Failed to find a suitable Vulkan device")
         };
 
         let device: ash::Device = {
@@ -186,25 +198,27 @@ impl AshGraphics {
 
             let priorities = [1.0];
 
-            let queue_info = [vk::DeviceQueueCreateInfo::builder()
+            let queue_info = [vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(queue_family_index as _)
-                .queue_priorities(&priorities)
-                .build()];
+                .queue_priorities(&priorities)];
 
             let device_extension_names_raw = [];
 
-            let device_create_info = vk::DeviceCreateInfo::builder()
+            let device_create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_info)
                 .enabled_extension_names(&device_extension_names_raw)
                 .enabled_features(&features);
 
-            instance
-                .create_device(physical_device, &device_create_info, None)
-                .unwrap()
+            unsafe {
+                instance
+                    .create_device(physical_device, &device_create_info, None)
+                    .unwrap()
+            }
         };
 
         let queue_index: usize = 0;
-        let queue: vk::Queue = device.get_device_queue(queue_family_index as _, queue_index as _);
+        let queue: vk::Queue =
+            unsafe { device.get_device_queue(queue_family_index as _, queue_index as _) };
 
         AshGraphics {
             queue_and_index: (queue, queue_index),
@@ -219,11 +233,11 @@ impl AshGraphics {
         match of {
             gpu::vk::GetProcOf::Instance(instance, name) => {
                 let ash_instance = vk::Instance::from_raw(instance as _);
-                self.entry.get_instance_proc_addr(ash_instance, name)
+                unsafe { self.entry.get_instance_proc_addr(ash_instance, name) }
             }
             gpu::vk::GetProcOf::Device(device, name) => {
                 let ash_device = vk::Device::from_raw(device as _);
-                self.instance.get_device_proc_addr(ash_device, name)
+                unsafe { self.instance.get_device_proc_addr(ash_device, name) }
             }
         }
     }

@@ -1,0 +1,68 @@
+# AGENTS.md - rust-skia development notes
+
+## Repository structure
+
+- `skia-bindings/` - Low-level C++ bindings. Contains:
+  - `skia/` - Git submodule pointing to `rust-skia/skia` fork; the tag follows the scheme
+    `m<milestone>.<ordinal>` (see `docs/adr/0002-skia-fork-tags-are-milestone-plus-ordinal.md`)
+  - `src/*.cpp` - C wrapper functions for Skia C++ APIs (parsed by bindgen). One file per area, for example `bindings.cpp` (core), `ganesh.cpp`, `graphite.cpp`, `shaper.cpp`, `skottie.cpp`, `svg.cpp`, `vulkan.cpp`.
+  - `Cargo.toml` - `[package.metadata] skia = "m<milestone>.<ordinal>"` must match submodule tag
+  - `build_support/` - Build configuration (e.g. `binaries_config.rs` for platform-specific logic)
+- `skia-safe/` - Safe Rust wrappers over `skia-bindings`. Mirrors Skia's include structure:
+  - `src/core/` -> `include/core/`
+  - `src/gpu/ganesh/` -> `include/gpu/ganesh/`
+  - `src/modules/shaper/` -> `modules/skshaper/include/`
+  - `src/modules/paragraph/` -> `modules/skparagraph/include/`
+  - etc.
+- `skia-wgpu/` - Runs Graphite's Dawn backend on the `wgpu` crate: the WebGPU C functions that the
+  backend calls, implemented on `wgpu` (the shim), one module per supported `wgpu` major version
+  behind the feature `wgpu-NN` (see `docs/adr/0003-skia-runs-on-wgpu-through-a-webgpu-shim.md`).
+  `skia-safe` uses it behind the same features.
+- `skia-org/` - Ports of the fiddles on skia.org, rendered per driver. `skia-org/README.md` maps
+  each skia.org page to its module and records how to fetch and port a fiddle.
+- `mk-workflows/` - Generator for the platform CI workflows in `.github/workflows/`; edit it, then
+  run `just workflows`. The macOS deployment target lives here.
+- CI Linux toolchain: `ghcr.io/pragmatrix/rust-skia-linux` is built from
+  `pragmatrix/rust-skia-images` (`linux/Dockerfile`, checked out at `../rust-skia-images`) and
+  published by that repo's manual Docker Image CI workflow. `docker/` here is unofficial.
+
+## Binding generation
+
+- Bindgen parses the `.cpp` files in `skia-bindings/src/` to discover `extern "C"` functions and types.
+- Touch `skia-bindings/src/bindings.cpp` and run `cargo check -p skia-bindings` to force regeneration.
+- Generated bindings land in `target/*/build/skia-bindings-*/out/skia/bindings.rs`.
+- C++ `enum class` variants get their `k` prefix stripped automatically by bindgen.
+- C++ namespaced types like `SkShapers::CT::LineBreakMode` become `SkShapers_CT_LineBreakMode`.
+
+## Common patterns in skia-safe
+
+- **Enum wrapping:** `pub type Foo = skia_bindings::SkFoo;` + `variant_name!(Foo::SomeVariant);`
+- **Struct wrapping:** `pub type Foo = Handle<SkFoo>;` or `pub type Foo = RCHandle<SkFoo>;`
+- **native_transmutable!** for types that are bit-for-bit compatible.
+- **require_type_equality!** to verify base class assumptions at compile time (e.g. `SkPixelRef_INHERITED` == `SkRefCnt`).
+- **variant_name!** to verify a variant exists at compile time (catches bindgen name changes).
+- Platform-gated code uses `#[cfg(any(target_os = "macos", target_os = "ios"))]`.
+- Functions returning `Option<Self>` via `Self::from_ptr(unsafe { ... })` - returns `None` if the C function returns null (used for platform-optional features like CoreText).
+
+## Skia milestone update checklist
+
+Task skills live in `.github/skills/`, and `.claude/skills/` links to them for Claude Code. Read
+the matching `SKILL.md` before a bindings change, a milestone update, or a release.
+
+Every Skia fork tag cut — a new milestone, a refresh from upstream, or a new fork patch — follows
+`.github/skills/skia-milestone-update/SKILL.md`. Versioning in short: crates are `0.XX.0` for
+milestone `mXX`; a same-milestone cut takes the next tag ordinal and keeps the crate version.
+
+Fork patches are named `rust-skia: <summary>`.
+
+`just diff-skia` range-diffs the fork patch stack of the submodule checkout (every commit on top of
+`upstream/chrome/mXX`) against the stack master records; it needs the `upstream` remote
+(google/skia) with both milestone branches fetched. It answers whether the fork patches match
+master; include/API diffs between milestones use direct
+`git -C skia-bindings/skia diff OLD_TAG..NEW_TAG -- ...` commands.
+
+## Release notes
+
+For rust-skia release notes format and authoring rules, use:
+
+- `.github/release-notes-guidelines.md`

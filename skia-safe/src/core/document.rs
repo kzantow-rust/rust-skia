@@ -1,22 +1,27 @@
-use crate::{interop::DynamicMemoryWStream, prelude::*, Canvas, Data, Rect, Size};
-use core::fmt;
-use skia_bindings::{SkDocument, SkRefCntBase};
-use std::{pin::Pin, ptr};
+//! High-level API for creating a document-based [`crate::Canvas`], e.g. for PDF output; pages are
+//! created with [`crate::Document::begin_page()`].
 
-pub struct Document<State = state::Open> {
-    // note: order matters here, first the document must be
-    // dropped _and then_ the stream.
+use std::{fmt, ptr};
+
+use skia_bindings::{self as sb, SkDocument, SkRefCntBase};
+
+use crate::{Canvas, Rect, Size, interop::RustWStream, prelude::*};
+
+pub struct Document<'a, State = state::Open> {
+    // Order matters here, first the document must be dropped _and then_ the stream.
     document: RCHandle<SkDocument>,
-    stream: Pin<Box<DynamicMemoryWStream>>,
+    stream: RustWStream<'a>,
 
     state: State,
 }
+
+require_type_equality!(sb::SkDocument_INHERITED, sb::SkRefCnt);
 
 impl NativeRefCountedBase for SkDocument {
     type Base = SkRefCntBase;
 }
 
-impl<State: fmt::Debug> fmt::Debug for Document<State> {
+impl<State: fmt::Debug> fmt::Debug for Document<'_, State> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
             .field("state", &self.state)
@@ -25,9 +30,13 @@ impl<State: fmt::Debug> fmt::Debug for Document<State> {
 }
 
 pub mod state {
-    use crate::Canvas;
-    use skia_bindings::SkCanvas;
+    //! The state of a [`crate::Document`]: [`Open`] while pages may be added, [`OnPage`] while a
+    //! page is being drawn onto.
     use std::{fmt, ptr};
+
+    use skia_bindings::SkCanvas;
+
+    use crate::Canvas;
 
     /// Document is currently open. May contain several pages.
     #[derive(Debug)]
@@ -45,27 +54,24 @@ pub mod state {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("OnPage")
                 .field("page", &self.page)
-                .field(
-                    "canvas",
-                    Canvas::borrow_from_native(unsafe { self.canvas.as_ref() }),
-                )
+                .field("canvas", unsafe {
+                    Canvas::borrow_from_native(self.canvas.as_ptr())
+                })
                 .finish()
         }
     }
 }
 
-impl<State> Document<State> {
+impl<State> Document<'_, State> {
     pub fn abort(mut self) {
-        unsafe { self.document.native_mut().abort() }
+        unsafe { sb::SkDocument_abort(self.document.native_ptr()) }
         drop(self)
     }
 }
 
-impl Document<state::Open> {
-    pub(crate) fn new(
-        stream: Pin<Box<DynamicMemoryWStream>>,
-        document: RCHandle<SkDocument>,
-    ) -> Self {
+impl<'a> Document<'a, state::Open> {
+    #[allow(unused)]
+    pub(crate) fn new(stream: RustWStream<'a>, document: RCHandle<SkDocument>) -> Self {
         Document {
             document,
             stream,
@@ -84,10 +90,11 @@ impl Document<state::Open> {
         mut self,
         size: impl Into<Size>,
         content: Option<&Rect>,
-    ) -> Document<state::OnPage> {
+    ) -> Document<'a, state::OnPage> {
         let size = size.into();
         let canvas = unsafe {
-            self.document.native_mut().beginPage(
+            sb::SkDocument_beginPage(
+                self.document.native_ptr(),
                 size.width,
                 size.height,
                 content.native_ptr_or_null(),
@@ -101,36 +108,37 @@ impl Document<state::Open> {
                 canvas: ptr::NonNull::new(canvas).unwrap(),
                 page: self.state.pages + 1,
             },
-        } as _
+        }
     }
 
     /// Close the document and return the encoded representation.
+    ///
     /// This function consumes and drops the document.
-    pub fn close(mut self) -> Data {
+    pub fn close(mut self) {
         unsafe {
-            self.document.native_mut().close();
+            sb::SkDocument_close(self.document.native_ptr());
         };
-        self.stream.detach_as_data()
     }
 }
 
-impl Document<state::OnPage> {
+impl<'a> Document<'a, state::OnPage> {
     /// The current page we are currently drawing on.
     pub fn page(&self) -> usize {
         self.state.page
     }
 
     /// Borrows the canvas for the current page on the document.
-    pub fn canvas(&mut self) -> &mut Canvas {
-        Canvas::borrow_from_native_mut(unsafe { self.state.canvas.as_mut() })
+    pub fn canvas(&mut self) -> &Canvas {
+        unsafe { Canvas::borrow_from_native(self.state.canvas.as_ptr()) }
     }
 
     /// Ends the page.
+    ///
     /// This function consumes the document and returns a new open document that
     /// contains the pages drawn so far.
-    pub fn end_page(mut self) -> Document {
+    pub fn end_page(mut self) -> Document<'a> {
         unsafe {
-            self.document.native_mut().endPage();
+            sb::SkDocument_endPage(self.document.native_ptr());
         }
 
         Document {
@@ -141,9 +149,9 @@ impl Document<state::OnPage> {
             },
         }
 
-        // TODO: think about providing a close() function that implicitly ends the page
+        // TODO: Think about providing a close() function that implicitly ends the page
         //       and calls close() on the Open document.
-        // TODO: think about providing a begin_page() function that implicitly ends the
+        // TODO: Think about providing a begin_page() function that implicitly ends the
         //       current page.
     }
 }

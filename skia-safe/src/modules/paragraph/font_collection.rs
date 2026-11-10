@@ -1,11 +1,13 @@
 use crate::{
-    interop::{self, FromStrs},
+    FontMgr, FontStyle, Typeface, Unichar,
+    interop::{self, FromStrs, VecSink},
     prelude::*,
     textlayout::ParagraphCache,
-    FontMgr, FontStyle, Typeface, Unichar,
 };
 use skia_bindings::{self as sb, skia_textlayout_FontCollection};
-use std::{ffi, fmt};
+use std::{ffi, fmt, ptr};
+
+use super::FontArguments;
 
 pub type FontCollection = RCHandle<skia_textlayout_FontCollection>;
 
@@ -109,38 +111,98 @@ impl FontCollection {
         family_names: &[impl AsRef<str>],
         font_style: FontStyle,
     ) -> Vec<Typeface> {
+        self.find_typefaces_with_font_arguments(family_names, font_style, None)
+    }
+
+    pub fn find_typefaces_with_font_arguments<'fa>(
+        &mut self,
+        family_names: &[impl AsRef<str>],
+        font_style: FontStyle,
+        font_args: impl Into<Option<&'fa FontArguments>>,
+    ) -> Vec<Typeface> {
         let family_names = interop::Strings::from_strs(family_names);
-        let mut typefaces = Typefaces::new();
+
+        let mut typefaces: Vec<Typeface> = Vec::new();
+        let mut set_typefaces = |tfs: &mut [sb::sk_sp<sb::SkTypeface>]| {
+            typefaces = tfs
+                .iter_mut()
+                .filter_map(|sp| {
+                    let ptr = sp.fPtr;
+                    sp.fPtr = ptr::null_mut();
+                    Typeface::from_ptr(ptr)
+                })
+                .collect()
+        };
+
         unsafe {
             sb::C_FontCollection_findTypefaces(
                 self.native_mut(),
                 family_names.native(),
                 font_style.into_native(),
-                typefaces.native_mut(),
+                font_args.into().native_ptr_or_null(),
+                VecSink::new_mut(&mut set_typefaces).native_mut(),
             )
         };
-        typefaces.into_vec()
+        typefaces
     }
 
-    pub fn default_fallback_char(
+    pub fn default_fallback_char<'fa>(
         &mut self,
         unicode: Unichar,
         font_style: FontStyle,
         locale: impl AsRef<str>,
+        font_args: impl Into<Option<&'fa FontArguments>>,
     ) -> Option<Typeface> {
+        self.default_fallback_char_and_families(
+            unicode,
+            &[] as &[&str],
+            font_style,
+            locale,
+            font_args,
+        )
+    }
+
+    pub fn default_fallback_char_and_families<'fa>(
+        &mut self,
+        unicode: Unichar,
+        family_names: &[impl AsRef<str>],
+        font_style: FontStyle,
+        locale: impl AsRef<str>,
+        font_args: impl Into<Option<&'fa FontArguments>>,
+    ) -> Option<Typeface> {
+        let family_names = interop::Strings::from_strs(family_names);
         let locale = interop::String::from_str(locale.as_ref());
         Typeface::from_ptr(unsafe {
             sb::C_FontCollection_defaultFallback(
                 self.native_mut(),
                 unicode,
+                family_names.native(),
                 font_style.into_native(),
                 locale.native(),
+                font_args.into().native_ptr_or_null(),
             )
         })
     }
 
     pub fn default_fallback(&mut self) -> Option<Typeface> {
         Typeface::from_ptr(unsafe { sb::C_FontCollection_defaultFallback2(self.native_mut()) })
+    }
+
+    pub fn default_emoji_fallback(
+        &mut self,
+        emoji_start: Unichar,
+        font_style: FontStyle,
+        locale: impl AsRef<str>,
+    ) -> Option<Typeface> {
+        let locale = interop::String::from_str(locale.as_ref());
+        Typeface::from_ptr(unsafe {
+            sb::C_FontCollection_defaultEmojiFallback(
+                self.native_mut(),
+                emoji_start,
+                font_style.into_native(),
+                locale.native(),
+            )
+        })
     }
 
     pub fn disable_font_fallback(&mut self) {
@@ -169,30 +231,6 @@ impl FontCollection {
 
     pub fn clear_caches(&mut self) {
         unsafe { self.native_mut().clearCaches() }
-    }
-}
-
-type Typefaces = Handle<sb::Typefaces>;
-
-impl NativeDrop for sb::Typefaces {
-    fn drop(&mut self) {
-        unsafe { sb::C_Typefaces_destruct(self) }
-    }
-}
-
-impl Typefaces {
-    pub fn new() -> Self {
-        Typefaces::construct(|tf| unsafe { sb::C_Typefaces_construct(tf) })
-    }
-
-    pub fn into_vec(mut self) -> Vec<Typeface> {
-        let count = unsafe { sb::C_Typefaces_count(self.native()) };
-        (0..count)
-            .map(|i| {
-                Typeface::from_ptr(unsafe { sb::C_Typefaces_release(self.native_mut(), i) })
-                    .unwrap()
-            })
-            .collect()
     }
 }
 

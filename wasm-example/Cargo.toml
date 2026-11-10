@@ -1,0 +1,14 @@
+[package]
+name = "wasm-example"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = ["skia-safe/gl"]
+
+[dependencies]
+skia-safe = { path = "../skia-safe" }
+skia-icon = { path = "../skia-icon" }
+gl = "0.14.0"

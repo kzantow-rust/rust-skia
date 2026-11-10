@@ -1,23 +1,24 @@
-#[cfg(feature = "gpu")]
-use crate::gpu;
-use crate::{
-    prelude::*, scalar, u8cpu, Bitmap, BlendMode, ClipOp, Color, Color4f, Data, Drawable,
-    FilterMode, Font, IPoint, IRect, ISize, Image, ImageFilter, ImageInfo, Matrix, Paint, Path,
-    Picture, Pixmap, Point, QuickReject, RRect, Rect, Region, SamplingOptions, Shader, Surface,
-    SurfaceProps, TextBlob, TextEncoding, Vector, Vertices, M44,
-};
-use skia_bindings as sb;
+//! [`Canvas`] provides an interface for drawing, and how the drawing is clipped and transformed.
+//! [`Canvas`] contains a stack of [`crate::Matrix`] and clip values.
+
+use std::{cell::UnsafeCell, ffi::CString, fmt, marker::PhantomData, mem, ops::Deref, ptr, slice};
+
+use sb::SkCanvas_FilterSpan;
 use skia_bindings::{
-    SkAutoCanvasRestore, SkCanvas, SkCanvas_SaveLayerRec, SkImageFilter, SkPaint, SkRect,
+    self as sb, SkAutoCanvasRestore, SkCanvas, SkCanvas_SaveLayerRec, SkColorSpace, SkImageFilter,
+    SkPaint, SkRect, U8CPU,
 };
-use std::{
-    convert::TryInto,
-    ffi::CString,
-    fmt,
-    marker::PhantomData,
-    mem,
-    ops::{Deref, DerefMut},
-    ptr, slice,
+
+#[cfg(feature = "graphite")]
+use crate::gpu::graphite;
+#[cfg(feature = "ganesh")]
+use crate::gpu::{DirectContext, RecordingContext};
+use crate::{Arc, ColorSpace};
+use crate::{
+    Bitmap, BlendMode, Blender, ClipOp, Color, Color4f, Data, Drawable, FilterMode, Font, GlyphId,
+    IPoint, IRect, ISize, Image, ImageFilter, ImageInfo, M44, Matrix, Mesh, Paint, Path, Picture,
+    Pixmap, Point, QuickReject, RRect, RSXform, Rect, Region, SamplingOptions, Shader, Surface,
+    SurfaceProps, TextBlob, TextEncoding, TileMode, Vector, Vertices, prelude::*, scalar,
 };
 
 pub use lattice::Lattice;
@@ -26,6 +27,7 @@ bitflags! {
     /// [`SaveLayerFlags`] provides options that may be used in any combination in [`SaveLayerRec`],
     /// defining how layer allocated by [`Canvas::save_layer()`] operates. It may be set to zero,
     /// [`PRESERVE_LCD_TEXT`], [`INIT_WITH_PREVIOUS`], or both flags.
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SaveLayerFlags: u32 {
         const PRESERVE_LCD_TEXT = sb::SkCanvas_SaveLayerFlagsSet_kPreserveLCDText_SaveLayerFlag as _;
         /// initializes with previous contents
@@ -35,22 +37,37 @@ bitflags! {
 }
 
 /// [`SaveLayerRec`] contains the state used to create the layer.
-#[allow(dead_code)]
+#[repr(C)]
 pub struct SaveLayerRec<'a> {
     // We _must_ store _references_ to the native types here, because not all of them are native
     // transmutable, like ImageFilter or Image, which are represented as ref counted pointers and so
     // we would store a reference to a pointer only.
     bounds: Option<&'a SkRect>,
     paint: Option<&'a SkPaint>,
+    filters: SkCanvas_FilterSpan,
     backdrop: Option<&'a SkImageFilter>,
+    backdrop_tile_mode: sb::SkTileMode,
+    color_space: Option<&'a SkColorSpace>,
     flags: SaveLayerFlags,
+    experimental_backdrop_scale: scalar,
 }
 
-impl<'a> NativeTransmutable<SkCanvas_SaveLayerRec> for SaveLayerRec<'a> {}
+native_transmutable!(SkCanvas_SaveLayerRec, SaveLayerRec<'_>);
 
-#[test]
-fn test_save_layer_rec_layout() {
-    SaveLayerRec::test_layout()
+impl Default for SaveLayerRec<'_> {
+    /// Sets [`Self::bounds`], [`Self::paint`], and [`Self::backdrop`] to `None`. Clears
+    /// [`Self::flags`].
+    ///
+    /// Returns empty [`SaveLayerRec`]
+    fn default() -> Self {
+        SaveLayerRec::construct(|slr| unsafe { sb::C_SkCanvas_SaveLayerRec_Construct(slr) })
+    }
+}
+
+impl Drop for SaveLayerRec<'_> {
+    fn drop(&mut self) {
+        unsafe { sb::C_SkCanvas_SaveLayerRec_destruct(self.native_mut()) }
+    }
 }
 
 impl fmt::Debug for SaveLayerRec<'_> {
@@ -62,93 +79,81 @@ impl fmt::Debug for SaveLayerRec<'_> {
                 "backdrop",
                 &ImageFilter::from_unshared_ptr_ref(&(self.backdrop.as_ptr_or_null() as *mut _)),
             )
+            .field("backdrop_tile_mode", &self.backdrop_tile_mode)
+            .field(
+                "color_space",
+                &ColorSpace::from_unshared_ptr_ref(&(self.color_space.as_ptr_or_null() as *mut _)),
+            )
             .field("flags", &self.flags)
+            .field(
+                "experimental_backdrop_scale",
+                &self.experimental_backdrop_scale,
+            )
             .finish()
-    }
-}
-
-impl<'a> Default for SaveLayerRec<'a> {
-    /// Sets [`Self::bounds`], [`Self::paint`], and [`Self::backdrop`] to `None`. Clears
-    /// [`Self::flags`].
-    ///
-    /// Returns empty [`SaveLayerRec`]
-    fn default() -> Self {
-        SaveLayerRec {
-            bounds: None,
-            paint: None,
-            backdrop: None,
-            flags: SaveLayerFlags::empty(),
-        }
     }
 }
 
 impl<'a> SaveLayerRec<'a> {
     /// Hints at layer size limit
-    pub fn bounds(self, bounds: &'a Rect) -> Self {
-        Self {
-            bounds: Some(bounds.native()),
-            ..self
-        }
+    #[must_use]
+    pub fn bounds(mut self, bounds: &'a Rect) -> Self {
+        self.bounds = Some(bounds.native());
+        self
     }
 
     /// Modifies overlay
-    pub fn paint(self, paint: &'a Paint) -> Self {
-        Self {
-            paint: Some(paint.native()),
-            ..self
-        }
+    #[must_use]
+    pub fn paint(mut self, paint: &'a Paint) -> Self {
+        self.paint = Some(paint.native());
+        self
     }
 
     /// If not `None`, this triggers the same initialization behavior as setting
     /// [`SaveLayerFlags::INIT_WITH_PREVIOUS`] on [`Self::flags`]: the current layer is copied into
     /// the new layer, rather than initializing the new layer with transparent-black. This is then
     /// filtered by [`Self::backdrop`] (respecting the current clip).
-    pub fn backdrop(self, backdrop: &'a ImageFilter) -> Self {
-        Self {
-            backdrop: Some(backdrop.native()),
-            ..self
-        }
-    }
-
-    #[deprecated(
-        since = "0.33.0",
-        note = "removed without replacement, does not set clip_mask"
-    )]
-    pub fn clip_mask(self, _clip_mask: &'a Image) -> Self {
+    #[must_use]
+    pub fn backdrop(mut self, backdrop: &'a ImageFilter) -> Self {
+        self.backdrop = Some(backdrop.native());
         self
     }
 
-    #[deprecated(
-        since = "0.33.0",
-        note = "removed without replacement, does not set clip_matrix"
-    )]
-    pub fn clip_matrix(self, _clip_matrix: &'a Matrix) -> Self {
+    /// If the layer is initialized with prior content (and/or with a backdrop filter) and this
+    /// would require sampling outside of the available backdrop, this is the tilemode applied
+    /// to the boundary of the prior layer's image.
+    #[must_use]
+    pub fn backdrop_tile_mode(mut self, backdrop_tile_mode: TileMode) -> Self {
+        self.backdrop_tile_mode = backdrop_tile_mode;
+        self
+    }
+
+    /// If not `None`, this triggers a color space conversion when the layer is restored. It
+    /// will be as if the layer's contents are drawn in this color space. Filters from
+    /// `backdrop` and `paint` will be applied in this color space.
+    pub fn color_space(mut self, color_space: &'a ColorSpace) -> Self {
+        self.color_space = Some(color_space.native());
         self
     }
 
     /// Preserves LCD text, creates with prior layer contents
-    pub fn flags(self, flags: SaveLayerFlags) -> Self {
-        Self { flags, ..self }
+    #[must_use]
+    pub fn flags(mut self, flags: SaveLayerFlags) -> Self {
+        self.flags = flags;
+        self
     }
 }
 
 /// Selects if an array of points are drawn as discrete points, as lines, or as an open polygon.
 pub use sb::SkCanvas_PointMode as PointMode;
-
-#[test]
-fn test_canvas_point_mode_naming() {
-    let _ = PointMode::Polygon;
-}
+variant_name!(PointMode::Polygon);
 
 /// [`SrcRectConstraint`] controls the behavior at the edge of source [`Rect`], provided to
 /// [`Canvas::draw_image_rect()`] when there is any filtering. If kStrict is set, then extra code is
 /// used to ensure it nevers samples outside of the src-rect.
+///
+/// [`SrcRectConstraint::Strict`] disables the use of mipmaps and anisotropic filtering.
 pub use sb::SkCanvas_SrcRectConstraint as SrcRectConstraint;
-
-#[test]
-fn test_src_rect_constraint_naming() {
-    let _ = SrcRectConstraint::Fast;
-}
+variant_name!(SrcRectConstraint::Fast);
 
 /// Provides access to Canvas's pixels.
 ///
@@ -165,10 +170,29 @@ pub struct TopLayerPixels<'a> {
     pub origin: IPoint,
 }
 
+/// Used to pass either a slice of [`Point`] or [`RSXform`] to [`Canvas::draw_glyphs_at`].
+#[derive(Clone, Debug)]
+pub enum GlyphPositions<'a> {
+    Points(&'a [Point]),
+    RSXforms(&'a [RSXform]),
+}
+
+impl<'a> From<&'a [Point]> for GlyphPositions<'a> {
+    fn from(points: &'a [Point]) -> Self {
+        Self::Points(points)
+    }
+}
+
+impl<'a> From<&'a [RSXform]> for GlyphPositions<'a> {
+    fn from(rs_xforms: &'a [RSXform]) -> Self {
+        Self::RSXforms(rs_xforms)
+    }
+}
+
 ///  [`Canvas`] provides an interface for drawing, and how the drawing is clipped and transformed.
 ///  [`Canvas`] contains a stack of [`Matrix`] and clip values.
 ///
-///  [`Canvas`] and [`Paint`] together provide the state to draw into [`Surface`] or `BaseDevice`.
+///  [`Canvas`] and [`Paint`] together provide the state to draw into [`Surface`] or `Device`.
 ///  Each [`Canvas`] draw call transforms the geometry of the object by the concatenation of all
 ///  [`Matrix`] values in the stack. The transformed geometry is clipped by the intersection
 ///  of all of clip values in the stack. The [`Canvas`] draw calls use [`Paint`] to supply drawing
@@ -181,20 +205,26 @@ pub struct TopLayerPixels<'a> {
 ///
 ///  To draw to a document, obtain [`Canvas`] from SVG canvas, document PDF, or
 ///  [`crate::PictureRecorder`]. [`crate::Document`] based [`Canvas`] and other [`Canvas`]
-///  subclasses reference BaseDevice describing the destination.
+///  subclasses reference Device describing the destination.
 ///
 ///  [`Canvas`] can be constructed to draw to [`Bitmap`] without first creating raster surface.
 ///  This approach may be deprecated in the future.
 #[repr(transparent)]
-pub struct Canvas(SkCanvas);
+pub struct Canvas(UnsafeCell<SkCanvas>);
 
-impl NativeAccess<SkCanvas> for Canvas {
-    fn native(&self) -> &SkCanvas {
-        &self.0
+impl Canvas {
+    pub(self) fn native(&self) -> &SkCanvas {
+        unsafe { &*self.0.get() }
     }
 
-    fn native_mut(&mut self) -> &mut SkCanvas {
-        &mut self.0
+    /// Returns a raw pointer to the native canvas for calls that may modify it.
+    ///
+    /// `SkCanvas` stores pointers into its own memory, and C++ writes through them. A `&mut
+    /// SkCanvas` would promise Rust that nothing else writes to the canvas while it exists, so
+    /// mutating calls go through the raw `sb::SkCanvas_*` functions with this pointer instead of
+    /// through the bindgen methods that take `&mut self`.
+    pub(crate) fn native_ptr(&self) -> *mut SkCanvas {
+        self.0.get()
     }
 }
 
@@ -227,19 +257,15 @@ impl Deref for OwnedCanvas<'_> {
     }
 }
 
-impl DerefMut for OwnedCanvas<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.0.as_mut() }
-    }
-}
-
 impl Drop for OwnedCanvas<'_> {
     /// Draws saved layers, if any.
     /// Frees up resources used by [`Canvas`].
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_destructor
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_destructor>
     fn drop(&mut self) {
-        unsafe { sb::C_SkCanvas_delete(self.native()) }
+        // The canvas is deleted through the owned pointer, because Rust forbids freeing memory
+        // while a reference to it, like the one `native()` returns, is still in use.
+        unsafe { sb::C_SkCanvas_delete(self.0.as_ptr().cast()) }
     }
 }
 
@@ -249,7 +275,7 @@ impl Default for OwnedCanvas<'_> {
     ///
     /// Returns empty [`Canvas`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_empty_constructor
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_empty_constructor>
     fn default() -> Self {
         let ptr = unsafe { sb::C_SkCanvas_newEmpty() };
         Canvas::own_from_native_ptr(ptr).unwrap()
@@ -259,18 +285,6 @@ impl Default for OwnedCanvas<'_> {
 impl fmt::Debug for OwnedCanvas<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("OwnedCanvas").field(self as &Canvas).finish()
-    }
-}
-
-impl AsMut<Canvas> for Canvas {
-    fn as_mut(&mut self) -> &mut Canvas {
-        self
-    }
-}
-
-impl<'lt> AsMut<Canvas> for OwnedCanvas<'lt> {
-    fn as_mut(&mut self) -> &mut Canvas {
-        self.deref_mut()
     }
 }
 
@@ -289,7 +303,7 @@ impl Canvas {
     ///
     /// Pixel buffer size should be info height times computed `row_bytes`.
     /// Pixels are not initialized.
-    /// To access pixels after drawing, call [`Self::flush()`] or [`Self::peek_pixels()`].
+    /// To access pixels after drawing, call `flush()` or [`Self::peek_pixels()`].
     ///
     /// - `info` width, height, [`crate::ColorType`], [`crate::AlphaType`], [`crate::ColorSpace`],
     ///   of raster surface; width, or height, or both, may be zero
@@ -297,6 +311,7 @@ impl Canvas {
     /// - `row_bytes` interval from one [`Surface`] row to the next, or zero
     /// - `props` LCD striping orientation and setting for device independent fonts;
     ///   may be `None`
+    ///
     /// Returns [`OwnedCanvas`] if all parameters are valid; otherwise, `None`.
     pub fn from_raster_direct<'pixels>(
         info: &ImageInfo,
@@ -324,7 +339,7 @@ impl Canvas {
     /// calls draw into pixels.
     /// [`crate::ColorType`] is set to [`crate::ColorType::n32()`].
     /// [`crate::AlphaType`] is set to [`crate::AlphaType::Premul`].
-    /// To access pixels after drawing, call [`Self::flush()`] or [`Self::peek_pixels()`].
+    /// To access pixels after drawing, call `flush()` or [`Self::peek_pixels()`].
     ///
     /// [`OwnedCanvas`] is returned if all parameters are valid.
     /// Valid parameters include:
@@ -341,6 +356,7 @@ impl Canvas {
     /// - `pixels` pointer to destination pixels buffer; buffer size should be height times
     ///   `row_bytes`
     /// - `row_bytes` interval from one [`Surface`] row to the next, or zero
+    ///
     /// Returns [`OwnedCanvas`] if all parameters are valid; otherwise, `None`
     pub fn from_raster_direct_n32<'pixels>(
         size: impl Into<ISize>,
@@ -365,9 +381,10 @@ impl Canvas {
     /// - `size` with and height zero or greater
     /// - `props` LCD striping orientation and setting for device independent fonts;
     ///   may be `None`
+    ///
     /// Returns [`Canvas`] placeholder with dimensions
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_int_int_const_SkSurfaceProps_star
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_int_int_const_SkSurfaceProps_star>
     #[allow(clippy::new_ret_no_self)]
     pub fn new<'lt>(
         size: impl Into<ISize>,
@@ -396,17 +413,26 @@ impl Canvas {
     /// - `bitmap` width, height, [`crate::ColorType`], [`crate::AlphaType`], and pixel storage of
     ///   raster surface
     /// - `props` order and orientation of RGB striping; and whether to use device independent fonts
+    ///
     /// Returns [`Canvas`] that can be used to draw into bitmap
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_const_SkBitmap_const_SkSurfaceProps
-    pub fn from_bitmap<'lt>(bitmap: &Bitmap, props: Option<&SurfaceProps>) -> OwnedCanvas<'lt> {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_copy_const_SkBitmap>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_const_SkBitmap_const_SkSurfaceProps>
+    pub fn from_bitmap<'lt>(
+        bitmap: &Bitmap,
+        props: Option<&SurfaceProps>,
+    ) -> Option<OwnedCanvas<'lt>> {
+        // <https://github.com/rust-skia/rust-skia/issues/669>
+        if !bitmap.is_ready_to_draw() {
+            return None;
+        }
         let props_ptr = props.native_ptr_or_null();
         let ptr = if props_ptr.is_null() {
             unsafe { sb::C_SkCanvas_newFromBitmap(bitmap.native()) }
         } else {
             unsafe { sb::C_SkCanvas_newFromBitmapAndProps(bitmap.native(), props_ptr) }
         };
-        Canvas::own_from_native_ptr(ptr).unwrap()
+        Canvas::own_from_native_ptr(ptr)
     }
 
     /// Returns [`ImageInfo`] for [`Canvas`]. If [`Canvas`] is not associated with raster surface or
@@ -414,7 +440,7 @@ impl Canvas {
     ///
     /// Returns dimensions and [`crate::ColorType`] of [`Canvas`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_imageInfo
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_imageInfo>
     pub fn image_info(&self) -> ImageInfo {
         let mut ii = ImageInfo::default();
         unsafe { sb::C_SkCanvas_imageInfo(self.native(), ii.native_mut()) };
@@ -425,26 +451,26 @@ impl Canvas {
     /// returns `true`. Otherwise, returns `false` and leave props unchanged.
     ///
     /// - `props` storage for writable [`SurfaceProps`]
+    ///
     /// Returns `true` if [`SurfaceProps`] was copied
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getProps
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getProps>
     pub fn props(&self) -> Option<SurfaceProps> {
         let mut sp = SurfaceProps::default();
-        unsafe { self.native().getProps(sp.native_mut()) }.if_true_some(sp)
+        unsafe { self.native().getProps(sp.native_mut()) }.then_some(sp)
     }
 
-    /// Triggers the immediate execution of all pending draw operations.
-    /// If [`Canvas`] is associated with GPU surface, resolves all pending GPU operations.
-    /// If [`Canvas`] is associated with raster surface, has no effect; raster draw operations are
-    /// never deferred.
-    ///
-    /// DEPRECATED: Replace usage with GrDirectContext::flush()
-    #[deprecated(since = "0.38.0", note = "Replace usage with DirectContext::flush()")]
-    pub fn flush(&mut self) -> &mut Self {
-        unsafe {
-            self.native_mut().flush();
-        }
-        self
+    /// Returns the [`SurfaceProps`] associated with the canvas (i.e., at the base of the layer
+    /// stack).
+    pub fn base_props(&self) -> SurfaceProps {
+        SurfaceProps::from_native_c(unsafe { self.native().getBaseProps() })
+    }
+
+    /// Returns the [`SurfaceProps`] associated with the canvas that are currently active (i.e., at
+    /// the top of the layer stack). This can differ from [`Self::base_props`] depending on the flags
+    /// passed to saveLayer (see [`SaveLayerFlags`]).
+    pub fn top_props(&self) -> SurfaceProps {
+        SurfaceProps::from_native_c(unsafe { self.native().getTopProps() })
     }
 
     /// Gets the size of the base or root layer in global canvas coordinates. The
@@ -453,7 +479,7 @@ impl Canvas {
     ///
     /// Returns integral size of base layer
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getBaseLayerSize
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getBaseLayerSize>
     pub fn base_layer_size(&self) -> ISize {
         let mut size = ISize::default();
         unsafe { sb::C_SkCanvas_getBaseLayerSize(self.native(), size.native_mut()) }
@@ -470,29 +496,49 @@ impl Canvas {
     /// - `info` width, height, [`crate::ColorType`], [`crate::AlphaType`], and
     ///   [`crate::ColorSpace`]
     /// - `props` [`SurfaceProps`] to match; may be `None` to match [`Canvas`]
+    ///
     /// Returns [`Surface`] matching info and props, or `None` if no match is available
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_makeSurface
-    pub fn new_surface(
-        &mut self,
-        info: &ImageInfo,
-        props: Option<&SurfaceProps>,
-    ) -> Option<Surface> {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_makeSurface>
+    pub fn new_surface(&self, info: &ImageInfo, props: Option<&SurfaceProps>) -> Option<Surface> {
         Surface::from_ptr(unsafe {
-            sb::C_SkCanvas_makeSurface(self.native_mut(), info.native(), props.native_ptr_or_null())
+            sb::C_SkCanvas_makeSurface(self.native_ptr(), info.native(), props.native_ptr_or_null())
         })
     }
 
-    /// Returns GPU context of the GPU surface associated with [`Canvas`].
+    /// Returns Ganesh context of the GPU surface associated with [`Canvas`].
     ///
     /// Returns GPU context, if available; `None` otherwise
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_recordingContext
-    #[cfg(feature = "gpu")]
-    pub fn recording_context(&mut self) -> Option<gpu::RecordingContext> {
-        gpu::RecordingContext::from_unshared_ptr(unsafe {
-            sb::C_SkCanvas_recordingContext(self.native_mut())
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_recordingContext>
+    #[cfg(feature = "ganesh")]
+    pub fn recording_context(&self) -> Option<RecordingContext> {
+        RecordingContext::from_unshared_ptr(unsafe {
+            sb::C_SkCanvas_recordingContext(self.native())
         })
+    }
+
+    /// Returns the [`DirectContext`].
+    /// This is a rust-skia helper for that makes it simpler to call [`Image::encode`].
+    #[cfg(feature = "ganesh")]
+    pub fn direct_context(&self) -> Option<DirectContext> {
+        self.recording_context()
+            .and_then(|mut c| c.as_direct_context())
+    }
+
+    /// Returns the [`graphite::Recorder`] for the GPU surface backing this
+    /// canvas, if it is Graphite-backed.
+    ///
+    /// [`Canvas::recorder()`] returns a *borrowed* pointer — the recorder is
+    /// owned by the surface/canvas — so the result is a
+    /// [`graphite::BorrowedRecorder`] that does not delete the recorder on drop
+    /// and is bound to this canvas's lifetime. Wrapping it in an owning handle
+    /// would double-free the recorder.
+    #[cfg(feature = "graphite")]
+    pub fn recorder(&self) -> Option<graphite::BorrowedRecorder<'_>> {
+        let recorder =
+            graphite::Recorder::from_ptr(unsafe { sb::C_SkCanvas_recorder(self.native()) })?;
+        Some(graphite::BorrowedRecorder::from_canvas(recorder, self))
     }
 
     /// Sometimes a canvas is owned by a surface. If it is, [`Self::surface()`] will return a bare
@@ -502,12 +548,14 @@ impl Canvas {
     /// This function is unsafe because it is not clear how exactly the lifetime of the canvas
     /// relates to surface returned.
     /// See also [`OwnedCanvas`], [`RCHandle<SkSurface>::canvas()`].
-    pub unsafe fn surface(&mut self) -> Option<Surface> {
-        // TODO: It might be possible to make this safe by returning a _kind of_ reference to the
-        //       Surface that can not be cloned and stays bound to the lifetime of canvas.
-        //       But even then, the Surface might exist twice then, which is confusing, but
-        //       probably safe, because the first instance is borrowed by the canvas.
-        Surface::from_unshared_ptr(self.native_mut().getSurface())
+    pub unsafe fn surface(&self) -> Option<Surface> {
+        unsafe {
+            // TODO: It might be possible to make this safe by returning a _kind of_ reference to the
+            //       Surface that can not be cloned and stays bound to the lifetime of canvas.
+            //       But even then, the Surface might exist twice then, which is confusing, but
+            //       probably safe, because the first instance is borrowed by the canvas.
+            Surface::from_unshared_ptr(self.native().getSurface())
+        }
     }
 
     /// Returns the pixel base address, [`ImageInfo`], `row_bytes`, and origin if the pixels
@@ -516,16 +564,18 @@ impl Canvas {
     /// - `info` storage for writable pixels' [`ImageInfo`]
     /// - `row_bytes` storage for writable pixels' row bytes
     /// - `origin` storage for [`Canvas`] top layer origin, its top-left corner
+    ///
     /// Returns address of pixels, or `None` if inaccessible
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_accessTopLayerPixels_a
-    /// example: https://fiddle.skia.org/c/@Canvas_accessTopLayerPixels_b
-    pub fn access_top_layer_pixels(&mut self) -> Option<TopLayerPixels> {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_accessTopLayerPixels_a>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_accessTopLayerPixels_b>
+    pub fn access_top_layer_pixels(&self) -> Option<TopLayerPixels> {
         let mut info = ImageInfo::default();
         let mut row_bytes = 0;
         let mut origin = IPoint::default();
         let ptr = unsafe {
-            self.native_mut().accessTopLayerPixels(
+            sb::SkCanvas_accessTopLayerPixels(
+                self.native_ptr(),
                 info.native_mut(),
                 &mut row_bytes,
                 origin.native_mut(),
@@ -549,7 +599,7 @@ impl Canvas {
 
     /// Returns `true` if [`Canvas`] has direct access to its pixels.
     ///
-    /// Pixels are readable when `BaseDevice` is raster. Pixels are not readable when [`Canvas`] is
+    /// Pixels are readable when `Device` is raster. Pixels are not readable when [`Canvas`] is
     /// returned from GPU surface, returned by [`crate::Document::begin_page()`], returned by
     /// [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a utility
     /// class like `DebugCanvas`.
@@ -559,11 +609,10 @@ impl Canvas {
     ///
     /// Returns [`Pixmap`] if [`Canvas`] has direct access to pixels
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_peekPixels
-    pub fn peek_pixels(&mut self) -> Option<Borrows<Pixmap>> {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_peekPixels>
+    pub fn peek_pixels(&self) -> Option<Pixmap> {
         let mut pixmap = Pixmap::default();
-        unsafe { self.native_mut().peekPixels(pixmap.native_mut()) }
-            .if_true_then_some(move || pixmap.borrows(self))
+        unsafe { sb::SkCanvas_peekPixels(self.native_ptr(), pixmap.native_mut()) }.then_some(pixmap)
     }
 
     /// Copies [`Rect`] of pixels from [`Canvas`] into `dst_pixels`. [`Matrix`] and clip are
@@ -574,7 +623,7 @@ impl Canvas {
     /// Copies each readable pixel intersecting both rectangles, without scaling,
     /// converting to `dst_info.color_type()` and `dst_info.alpha_type()` if required.
     ///
-    /// Pixels are readable when `BaseDevice` is raster, or backed by a GPU.
+    /// Pixels are readable when `Device` is raster, or backed by a GPU.
     /// Pixels are not readable when [`Canvas`] is returned by [`crate::Document::begin_page()`],
     /// returned by [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a
     /// utility class like `DebugCanvas`.
@@ -600,10 +649,11 @@ impl Canvas {
     /// - `dst_row_bytes` size of one destination row; `dst_info.width()` times pixel size, or
     ///   larger
     /// - `src_point` offset into readable pixels; may be negative
+    ///
     /// Returns `true` if pixels were copied
     #[must_use]
     pub fn read_pixels(
-        &mut self,
+        &self,
         dst_info: &ImageInfo,
         dst_pixels: &mut [u8],
         dst_row_bytes: usize,
@@ -613,7 +663,8 @@ impl Canvas {
         let required_size = dst_info.compute_byte_size(dst_row_bytes);
         (dst_pixels.len() >= required_size)
             && unsafe {
-                self.native_mut().readPixels(
+                sb::SkCanvas_readPixels(
+                    self.native_ptr(),
                     dst_info.native(),
                     dst_pixels.as_mut_ptr() as _,
                     dst_row_bytes,
@@ -632,7 +683,7 @@ impl Canvas {
     /// Copies each readable pixel intersecting both rectangles, without scaling,
     /// converting to `pixmap.color_type()` and `pixmap.alpha_type()` if required.
     ///
-    /// Pixels are readable when `BaseDevice` is raster, or backed by a GPU. Pixels are not readable
+    /// Pixels are readable when `Device` is raster, or backed by a GPU. Pixels are not readable
     /// when [`Canvas`] is returned by [`crate::Document::begin_page()`], returned by
     /// [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a utility
     /// class like `DebugCanvas`.
@@ -655,13 +706,14 @@ impl Canvas {
     ///
     /// - `pixmap` storage for pixels copied from [`Canvas`]
     /// - `src` offset into readable pixels ; may be negative
+    ///
     /// Returns `true` if pixels were copied
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_readPixels_2
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_readPixels_2>
     #[must_use]
-    pub fn read_pixels_to_pixmap(&mut self, pixmap: &mut Pixmap, src: impl Into<IPoint>) -> bool {
+    pub fn read_pixels_to_pixmap(&self, pixmap: &mut Pixmap, src: impl Into<IPoint>) -> bool {
         let src = src.into();
-        unsafe { self.native_mut().readPixels1(pixmap.native(), src.x, src.y) }
+        unsafe { sb::SkCanvas_readPixels1(self.native_ptr(), pixmap.native(), src.x, src.y) }
     }
 
     /// Copies [`Rect`] of pixels from [`Canvas`] into bitmap. [`Matrix`] and clip are
@@ -673,7 +725,7 @@ impl Canvas {
     /// Copies each readable pixel intersecting both rectangles, without scaling,
     /// converting to `bitmap.color_type()` and `bitmap.alpha_type()` if required.
     ///
-    /// Pixels are readable when `BaseDevice` is raster, or backed by a GPU. Pixels are not readable
+    /// Pixels are readable when `Device` is raster, or backed by a GPU. Pixels are not readable
     /// when [`Canvas`] is returned by [`crate::Document::begin_page()`], returned by
     /// [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a utility
     /// class like DebugCanvas.
@@ -696,13 +748,14 @@ impl Canvas {
     ///
     /// - `bitmap` storage for pixels copied from [`Canvas`]
     /// - `src` offset into readable pixels; may be negative
+    ///
     /// Returns `true` if pixels were copied
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_readPixels_3
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_readPixels_3>
     #[must_use]
-    pub fn read_pixels_to_bitmap(&mut self, bitmap: &mut Bitmap, src: impl Into<IPoint>) -> bool {
+    pub fn read_pixels_to_bitmap(&self, bitmap: &mut Bitmap, src: impl Into<IPoint>) -> bool {
         let src = src.into();
-        unsafe { self.native_mut().readPixels2(bitmap.native(), src.x, src.y) }
+        unsafe { sb::SkCanvas_readPixels2(self.native_ptr(), bitmap.native_mut(), src.x, src.y) }
     }
 
     /// Copies [`Rect`] from pixels to [`Canvas`]. [`Matrix`] and clip are ignored.
@@ -713,7 +766,7 @@ impl Canvas {
     /// Copies each readable pixel intersecting both rectangles, without scaling,
     /// converting to `image_info().color_type()` and `image_info().alpha_type()` if required.
     ///
-    /// Pixels are writable when `BaseDevice` is raster, or backed by a GPU.
+    /// Pixels are writable when `Device` is raster, or backed by a GPU.
     /// Pixels are not writable when [`Canvas`] is returned by [`crate::Document::begin_page()`],
     /// returned by [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a
     /// utility class like `DebugCanvas`.
@@ -736,12 +789,13 @@ impl Canvas {
     /// - `pixels` pixels to copy, of size `info.height()` times `row_bytes`, or larger
     /// - `row_bytes` size of one row of pixels; info.width() times pixel size, or larger
     /// - `offset` offset into [`Canvas`] writable pixels; may be negative
+    ///
     /// Returns `true` if pixels were written to [`Canvas`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_writePixels
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_writePixels>
     #[must_use]
     pub fn write_pixels(
-        &mut self,
+        &self,
         info: &ImageInfo,
         pixels: &[u8],
         row_bytes: usize,
@@ -751,7 +805,8 @@ impl Canvas {
         let required_size = info.compute_byte_size(row_bytes);
         (pixels.len() >= required_size)
             && unsafe {
-                self.native_mut().writePixels(
+                sb::SkCanvas_writePixels(
+                    self.native_ptr(),
                     info.native(),
                     pixels.as_ptr() as _,
                     row_bytes,
@@ -770,7 +825,7 @@ impl Canvas {
     /// Copies each readable pixel intersecting both rectangles, without scaling,
     /// converting to `image_info().color_type()` and `image_info().alpha_type()` if required.
     ///
-    /// Pixels are writable when `BaseDevice` is raster, or backed by a GPU. Pixels are not writable
+    /// Pixels are writable when `Device` is raster, or backed by a GPU. Pixels are not writable
     /// when [`Canvas`] is returned by [`crate::Document::begin_page()`], returned by
     /// [`Handle<SkPictureRecorder>::begin_recording()`], or [`Canvas`] is the base of a utility
     /// class like `DebugCanvas`.
@@ -786,24 +841,22 @@ impl Canvas {
     /// - Source and destination rectangles do not intersect.
     /// - bitmap does not have allocated pixels.
     /// - bitmap pixels could not be converted to [`Canvas`] `image_info().color_type()` or
-    /// `image_info().alpha_type()`.
+    ///   `image_info().alpha_type()`.
     /// - [`Canvas`] pixels are not writable; for instance, [`Canvas`] is document based.
     /// - bitmap pixels are inaccessible; for instance, bitmap wraps a texture.
     ///
     /// - `bitmap` contains pixels copied to [`Canvas`]
     /// - `offset` offset into [`Canvas`] writable pixels; may be negative
+    ///
     /// Returns `true` if pixels were written to [`Canvas`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_writePixels_2
-    /// example: https://fiddle.skia.org/c/@State_Stack_a
-    /// example: https://fiddle.skia.org/c/@State_Stack_b
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_writePixels_2>
+    /// Example (C++): <https://fiddle.skia.org/c/@State_Stack_a>
+    /// Example (C++): <https://fiddle.skia.org/c/@State_Stack_b>
     #[must_use]
-    pub fn write_pixels_from_bitmap(&mut self, bitmap: &Bitmap, offset: impl Into<IPoint>) -> bool {
+    pub fn write_pixels_from_bitmap(&self, bitmap: &Bitmap, offset: impl Into<IPoint>) -> bool {
         let offset = offset.into();
-        unsafe {
-            self.native_mut()
-                .writePixels1(bitmap.native(), offset.x, offset.y)
-        }
+        unsafe { sb::SkCanvas_writePixels1(self.native_ptr(), bitmap.native(), offset.x, offset.y) }
     }
 
     /// Saves [`Matrix`] and clip.
@@ -822,14 +875,14 @@ impl Canvas {
     ///
     /// Returns depth of saved stack
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_save
-    pub fn save(&mut self) -> usize {
-        unsafe { self.native_mut().save().try_into().unwrap() }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_save>
+    pub fn save(&self) -> usize {
+        unsafe { sb::SkCanvas_save(self.native_ptr()).try_into().unwrap() }
     }
 
     // The save_layer(bounds, paint) variants have been replaced by SaveLayerRec.
 
-    /// Saves [`Matrix`] and clip, and allocates [`Bitmap`] for subsequent drawing.
+    /// Saves [`Matrix`] and clip, and allocates [`Surface`] for subsequent drawing.
     ///
     /// Calling [`Self::restore()`] discards changes to [`Matrix`] and clip, and blends layer with
     /// alpha opacity onto prior layer.
@@ -842,28 +895,37 @@ impl Canvas {
     /// [`Rect`] bounds suggests but does not define layer size. To clip drawing to a specific
     /// rectangle, use [`Self::clip_rect()`].
     ///
-    /// alpha of zero is fully transparent, 255 is fully opaque.
+    /// alpha of zero is fully transparent, 1.0 is fully opaque.
     ///
     /// Call [`Self::restore_to_count()`] with result to restore this and subsequent saves.
     ///
     /// - `bounds` hint to limit the size of layer; may be `None`
     /// - `alpha` opacity of layer
+    ///
     /// Returns depth of saved stack
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_saveLayerAlpha
-    pub fn save_layer_alpha(&mut self, bounds: impl Into<Option<Rect>>, alpha: u8cpu) -> usize {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_saveLayerAlpha>
+    pub fn save_layer_alpha_f(&self, bounds: impl Into<Option<Rect>>, alpha: f32) -> usize {
         unsafe {
-            self.native_mut()
-                .saveLayerAlpha(bounds.into().native().as_ptr_or_null(), alpha)
+            sb::SkCanvas_saveLayerAlphaf(
+                self.native_ptr(),
+                bounds.into().native().as_ptr_or_null(),
+                alpha,
+            )
         }
         .try_into()
         .unwrap()
     }
 
-    /// Saves [`Matrix`] and clip, and allocates [`Bitmap`] for subsequent drawing.
+    /// Helper that accepts an int between 0 and 255, and divides it by 255.0
+    pub fn save_layer_alpha(&self, bounds: impl Into<Option<Rect>>, alpha: U8CPU) -> usize {
+        self.save_layer_alpha_f(bounds, alpha as f32 * (1.0 / 255.0))
+    }
+
+    /// Saves [`Matrix`] and clip, and allocates [`Surface`] for subsequent drawing.
     ///
     /// Calling [`Self::restore()`] discards changes to [`Matrix`] and clip,
-    /// and blends [`Bitmap`] with alpha opacity onto the prior layer.
+    /// and blends [`Surface`] with alpha opacity onto the prior layer.
     ///
     /// [`Matrix`] may be changed by [`Self::translate()`], [`Self::scale()`], [`Self::rotate()`],
     /// [`Self::skew()`], [`Self::concat()`], [`Self::set_matrix()`], and [`Self::reset_matrix()`].
@@ -875,11 +937,14 @@ impl Canvas {
     /// Call [`Self::restore_to_count()`] with result to restore this and subsequent saves.
     ///
     /// - `layer_rec` layer state
+    ///
     /// Returns depth of save state stack before this call was made.
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_saveLayer_3
-    pub fn save_layer(&mut self, layer_rec: &SaveLayerRec) -> usize {
-        unsafe { self.native_mut().saveLayer1(layer_rec.native()) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_saveLayer>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_saveLayer_4>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_saveLayer_3>
+    pub fn save_layer(&self, layer_rec: &SaveLayerRec) -> usize {
+        unsafe { sb::SkCanvas_saveLayer1(self.native_ptr(), layer_rec.native()) }
             .try_into()
             .unwrap()
     }
@@ -889,11 +954,12 @@ impl Canvas {
     ///
     /// Does nothing if the stack is empty.
     ///
-    /// example: https://fiddle.skia.org/c/@AutoCanvasRestore_restore
+    /// Example (C++): <https://fiddle.skia.org/c/@AutoCanvasRestore_restore>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_restore>
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_restore
-    pub fn restore(&mut self) -> &mut Self {
-        unsafe { self.native_mut().restore() };
+    ///
+    pub fn restore(&self) -> &Self {
+        unsafe { sb::SkCanvas_restore(self.native_ptr()) };
         self
     }
 
@@ -904,7 +970,7 @@ impl Canvas {
     ///
     /// Returns depth of save state stack
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getSaveCount
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getSaveCount>
     pub fn save_count(&self) -> usize {
         unsafe { self.native().getSaveCount() }.try_into().unwrap()
     }
@@ -917,12 +983,9 @@ impl Canvas {
     ///
     /// - `saveCount` depth of state stack to restore
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_restoreToCount
-    pub fn restore_to_count(&mut self, save_count: usize) -> &mut Self {
-        unsafe {
-            self.native_mut()
-                .restoreToCount(save_count.try_into().unwrap())
-        }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_restoreToCount>
+    pub fn restore_to_count(&self, save_count: usize) -> &Self {
+        unsafe { sb::SkCanvas_restoreToCount(self.native_ptr(), save_count.try_into().unwrap()) }
         self
     }
 
@@ -935,10 +998,10 @@ impl Canvas {
     ///
     /// - `d` distance to translate
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_translate
-    pub fn translate(&mut self, d: impl Into<Vector>) -> &mut Self {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_translate>
+    pub fn translate(&self, d: impl Into<Vector>) -> &Self {
         let d = d.into();
-        unsafe { self.native_mut().translate(d.x, d.y) }
+        unsafe { sb::SkCanvas_translate(self.native_ptr(), d.x, d.y) }
         self
     }
 
@@ -952,9 +1015,9 @@ impl Canvas {
     /// - `sx` amount to scale on x-axis
     /// - `sy` amount to scale on y-axis
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_scale
-    pub fn scale(&mut self, (sx, sy): (scalar, scalar)) -> &mut Self {
-        unsafe { self.native_mut().scale(sx, sy) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_scale>
+    pub fn scale(&self, (sx, sy): (scalar, scalar)) -> &Self {
+        unsafe { sb::SkCanvas_scale(self.native_ptr(), sx, sy) }
         self
     }
 
@@ -971,11 +1034,14 @@ impl Canvas {
     /// - `degrees` amount to rotate, in degrees
     /// - `p` the point to rotate about
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_rotate_2
-    pub fn rotate(&mut self, degrees: scalar, p: Option<Point>) -> &mut Self {
-        match p {
-            Some(point) => unsafe { self.native_mut().rotate1(degrees, point.x, point.y) },
-            None => unsafe { self.native_mut().rotate(degrees) },
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_rotate>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_rotate_2>
+    pub fn rotate(&self, degrees: scalar, p: Option<Point>) -> &Self {
+        unsafe {
+            match p {
+                Some(point) => sb::SkCanvas_rotate1(self.native_ptr(), degrees, point.x, point.y),
+                None => sb::SkCanvas_rotate(self.native_ptr(), degrees),
+            }
         }
         self
     }
@@ -992,9 +1058,9 @@ impl Canvas {
     /// - `sx` amount to skew on x-axis
     /// - `sy` amount to skew on y-axis
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_skew
-    pub fn skew(&mut self, (sx, sy): (scalar, scalar)) -> &mut Self {
-        unsafe { self.native_mut().skew(sx, sy) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_skew>
+    pub fn skew(&self, (sx, sy): (scalar, scalar)) -> &Self {
+        unsafe { sb::SkCanvas_skew(self.native_ptr(), sx, sy) }
         self
     }
 
@@ -1005,17 +1071,14 @@ impl Canvas {
     ///
     /// - `matrix` matrix to premultiply with existing [`Matrix`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_concat
-    pub fn concat(&mut self, matrix: &Matrix) -> &mut Self {
-        unsafe { self.native_mut().concat(matrix.native()) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_concat>
+    pub fn concat(&self, matrix: &Matrix) -> &Self {
+        unsafe { sb::SkCanvas_concat(self.native_ptr(), matrix.native()) }
         self
     }
 
-    // TODO: markCTM
-    // TODO: findMarkedCTM
-
-    pub fn concat_44(&mut self, m: &M44) -> &mut Self {
-        unsafe { self.native_mut().concat1(m.native()) }
+    pub fn concat_44(&self, m: &M44) -> &Self {
+        unsafe { sb::SkCanvas_concat1(self.native_ptr(), m.native()) }
         self
     }
 
@@ -1024,18 +1087,18 @@ impl Canvas {
     ///
     /// - `matrix` matrix to copy, replacing existing [`Matrix`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_setMatrix
-    pub fn set_matrix(&mut self, matrix: &M44) -> &mut Self {
-        unsafe { self.native_mut().setMatrix(matrix.native()) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_setMatrix>
+    pub fn set_matrix(&self, matrix: &M44) -> &Self {
+        unsafe { sb::SkCanvas_setMatrix(self.native_ptr(), matrix.native()) }
         self
     }
 
     /// Sets [`Matrix`] to the identity matrix.
     /// Any prior matrix state is overwritten.
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_resetMatrix
-    pub fn reset_matrix(&mut self) -> &mut Self {
-        unsafe { self.native_mut().resetMatrix() }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_resetMatrix>
+    pub fn reset_matrix(&self) -> &Self {
+        unsafe { sb::SkCanvas_resetMatrix(self.native_ptr()) }
         self
     }
 
@@ -1047,15 +1110,16 @@ impl Canvas {
     /// - `op` [`ClipOp`] to apply to clip
     /// - `do_anti_alias` `true` if clip is to be anti-aliased
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_clipRect
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_clipRect>
     pub fn clip_rect(
-        &mut self,
+        &self,
         rect: impl AsRef<Rect>,
         op: impl Into<Option<ClipOp>>,
         do_anti_alias: impl Into<Option<bool>>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().clipRect(
+            sb::SkCanvas_clipRect(
+                self.native_ptr(),
                 rect.as_ref().native(),
                 op.into().unwrap_or_default(),
                 do_anti_alias.into().unwrap_or_default(),
@@ -1064,11 +1128,7 @@ impl Canvas {
         self
     }
 
-    pub fn clip_irect(
-        &mut self,
-        irect: impl AsRef<IRect>,
-        op: impl Into<Option<ClipOp>>,
-    ) -> &mut Self {
+    pub fn clip_irect(&self, irect: impl AsRef<IRect>, op: impl Into<Option<ClipOp>>) -> &Self {
         let r = Rect::from(*irect.as_ref());
         self.clip_rect(r, op, false)
     }
@@ -1082,15 +1142,16 @@ impl Canvas {
     /// - `op` [`ClipOp`] to apply to clip
     /// - `do_anti_alias` `true` if clip is to be anti-aliased
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_clipRRect
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_clipRRect>
     pub fn clip_rrect(
-        &mut self,
+        &self,
         rrect: impl AsRef<RRect>,
         op: impl Into<Option<ClipOp>>,
         do_anti_alias: impl Into<Option<bool>>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().clipRRect(
+            sb::SkCanvas_clipRRect(
+                self.native_ptr(),
                 rrect.as_ref().native(),
                 op.into().unwrap_or_default(),
                 do_anti_alias.into().unwrap_or_default(),
@@ -1100,7 +1161,7 @@ impl Canvas {
     }
 
     /// Replaces clip with the intersection or difference of clip and `path`,
-    /// with an aliased or anti-aliased clip edge. [`crate::path::FillType`] determines if `path`
+    /// with an aliased or anti-aliased clip edge. [`crate::PathFillType`] determines if `path`
     /// describes the area inside or outside its contours; and if path contour overlaps
     /// itself or another path contour, whether the overlaps form part of the area.
     /// `path` is transformed by [`Matrix`] before it is combined with clip.
@@ -1109,15 +1170,16 @@ impl Canvas {
     /// - `op` [`ClipOp`] to apply to clip
     /// - `do_anti_alias` `true` if clip is to be anti-aliased
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_clipPath
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_clipPath>
     pub fn clip_path(
-        &mut self,
+        &self,
         path: &Path,
         op: impl Into<Option<ClipOp>>,
         do_anti_alias: impl Into<Option<bool>>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().clipPath(
+            sb::SkCanvas_clipPath(
+                self.native_ptr(),
                 path.native(),
                 op.into().unwrap_or_default(),
                 do_anti_alias.into().unwrap_or_default(),
@@ -1126,14 +1188,10 @@ impl Canvas {
         self
     }
 
-    pub fn clip_shader(
-        &mut self,
-        shader: impl Into<Shader>,
-        op: impl Into<Option<ClipOp>>,
-    ) -> &mut Self {
+    pub fn clip_shader(&self, shader: impl Into<Shader>, op: impl Into<Option<ClipOp>>) -> &Self {
         unsafe {
             sb::C_SkCanvas_clipShader(
-                self.native_mut(),
+                self.native_ptr(),
                 shader.into().into_ptr(),
                 op.into().unwrap_or(ClipOp::Intersect),
             )
@@ -1148,11 +1206,14 @@ impl Canvas {
     /// - `device_rgn` [`Region`] to combine with clip
     /// - `op` [`ClipOp`] to apply to clip
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_clipRegion
-    pub fn clip_region(&mut self, device_rgn: &Region, op: impl Into<Option<ClipOp>>) -> &mut Self {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_clipRegion>
+    pub fn clip_region(&self, device_rgn: &Region, op: impl Into<Option<ClipOp>>) -> &Self {
         unsafe {
-            self.native_mut()
-                .clipRegion(device_rgn.native(), op.into().unwrap_or_default())
+            sb::SkCanvas_clipRegion(
+                self.native_ptr(),
+                device_rgn.native(),
+                op.into().unwrap_or_default(),
+            )
         }
         self
     }
@@ -1167,10 +1228,10 @@ impl Canvas {
     ///
     /// Returns bounds of clip in local coordinates
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getLocalClipBounds
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getLocalClipBounds>
     pub fn local_clip_bounds(&self) -> Option<Rect> {
-        let r = Rect::from_native_c(unsafe { sb::C_SkCanvas_getLocalClipBounds(self.native()) });
-        r.is_empty().if_false_some(r)
+        let r = Rect::construct(|r| unsafe { sb::C_SkCanvas_getLocalClipBounds(self.native(), r) });
+        (!r.is_empty()).then_some(r)
     }
 
     /// Returns [`IRect`] bounds of clip, unaffected by [`Matrix`]. If clip is empty,
@@ -1178,12 +1239,13 @@ impl Canvas {
     ///
     /// Unlike [`Self::local_clip_bounds()`], returned [`IRect`] is not outset.
     ///
-    /// Returns bounds of clip in `BaseDevice` coordinates
+    /// Returns bounds of clip in `Device` coordinates
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getDeviceClipBounds
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getDeviceClipBounds>
     pub fn device_clip_bounds(&self) -> Option<IRect> {
-        let r = IRect::from_native_c(unsafe { sb::C_SkCanvas_getDeviceClipBounds(self.native()) });
-        r.is_empty().if_false_some(r)
+        let r =
+            IRect::construct(|r| unsafe { sb::C_SkCanvas_getDeviceClipBounds(self.native(), r) });
+        (!r.is_empty()).then_some(r)
     }
 
     /// Fills clip with color `color`.
@@ -1191,14 +1253,19 @@ impl Canvas {
     ///
     /// - `color` [`Color4f`] representing unpremultiplied color.
     /// - `mode` [`BlendMode`] used to combine source color and destination
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawColor>
     pub fn draw_color(
-        &mut self,
+        &self,
         color: impl Into<Color4f>,
         mode: impl Into<Option<BlendMode>>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut()
-                .drawColor(&color.into().into_native(), mode.into().unwrap_or_default())
+            sb::SkCanvas_drawColor(
+                self.native_ptr(),
+                &color.into().into_native(),
+                mode.into().unwrap_or_default(),
+            )
         }
         self
     }
@@ -1207,7 +1274,7 @@ impl Canvas {
     /// This has the effect of replacing all pixels contained by clip with `color`.
     ///
     /// - `color` [`Color4f`] representing unpremultiplied color.
-    pub fn clear(&mut self, color: impl Into<Color4f>) -> &mut Self {
+    pub fn clear(&self, color: impl Into<Color4f>) -> &Self {
         self.draw_color(color, BlendMode::Src)
     }
 
@@ -1215,15 +1282,15 @@ impl Canvas {
     /// such as drawing with [`BlendMode`], return undefined results. `discard()` does
     /// not change clip or [`Matrix`].
     ///
-    /// `discard()` may do nothing, depending on the implementation of [`Surface`] or `BaseDevice`
+    /// `discard()` may do nothing, depending on the implementation of [`Surface`] or `Device`
     /// that created [`Canvas`].
     ///
     /// `discard()` allows optimized performance on subsequent draws by removing
-    /// cached data associated with [`Surface`] or `BaseDevice`.
+    /// cached data associated with [`Surface`] or `Device`.
     /// It is not necessary to call `discard()` once done with [`Canvas`];
-    /// any cached data is deleted when owning [`Surface`] or `BaseDevice` is deleted.
-    pub fn discard(&mut self) -> &mut Self {
-        unsafe { sb::C_SkCanvas_discard(self.native_mut()) }
+    /// any cached data is deleted when owning [`Surface`] or `Device` is deleted.
+    pub fn discard(&self) -> &Self {
+        unsafe { sb::C_SkCanvas_discard(self.native_ptr()) }
         self
     }
 
@@ -1233,9 +1300,9 @@ impl Canvas {
     ///
     /// - `paint` graphics state used to fill [`Canvas`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawPaint
-    pub fn draw_paint(&mut self, paint: &Paint) -> &mut Self {
-        unsafe { self.native_mut().drawPaint(paint.native()) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawPaint>
+    pub fn draw_paint(&self, paint: &Paint) -> &Self {
+        unsafe { sb::SkCanvas_drawPaint(self.native_ptr(), paint.native()) }
         self
     }
 
@@ -1267,11 +1334,16 @@ impl Canvas {
     /// - `pts` array of points to draw
     /// - `paint` stroke, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawPoints
-    pub fn draw_points(&mut self, mode: PointMode, pts: &[Point], paint: &Paint) -> &mut Self {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawPoints>
+    pub fn draw_points(&self, mode: PointMode, pts: &[Point], paint: &Paint) -> &Self {
         unsafe {
-            self.native_mut()
-                .drawPoints(mode, pts.len(), pts.native().as_ptr(), paint.native())
+            sb::C_SkCanvas_drawPoints(
+                self.native_ptr(),
+                mode,
+                pts.native().as_ptr(),
+                pts.len(),
+                paint.native(),
+            )
         }
         self
     }
@@ -1286,9 +1358,11 @@ impl Canvas {
     ///
     /// - `p` top-left edge of circle or square
     /// - `paint` stroke, blend, color, and so on, used to draw
-    pub fn draw_point(&mut self, p: impl Into<Point>, paint: &Paint) -> &mut Self {
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawPoint>
+    pub fn draw_point(&self, p: impl Into<Point>, paint: &Paint) -> &Self {
         let p = p.into();
-        unsafe { self.native_mut().drawPoint(p.x, p.y, paint.native()) }
+        unsafe { sb::SkCanvas_drawPoint(self.native_ptr(), p.x, p.y, paint.native()) }
         self
     }
 
@@ -1300,17 +1374,11 @@ impl Canvas {
     /// - `p1` start of line segment
     /// - `p2` end of line segment
     /// - `paint` stroke, blend, color, and so on, used to draw
-    pub fn draw_line(
-        &mut self,
-        p1: impl Into<Point>,
-        p2: impl Into<Point>,
-        paint: &Paint,
-    ) -> &mut Self {
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawLine>
+    pub fn draw_line(&self, p1: impl Into<Point>, p2: impl Into<Point>, paint: &Paint) -> &Self {
         let (p1, p2) = (p1.into(), p2.into());
-        unsafe {
-            self.native_mut()
-                .drawLine(p1.x, p1.y, p2.x, p2.y, paint.native())
-        }
+        unsafe { sb::SkCanvas_drawLine(self.native_ptr(), p1.x, p1.y, p2.x, p2.y, paint.native()) }
         self
     }
 
@@ -1322,12 +1390,9 @@ impl Canvas {
     /// - `rect` rectangle to draw
     /// - `paint` stroke or fill, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawRect
-    pub fn draw_rect(&mut self, rect: impl AsRef<Rect>, paint: &Paint) -> &mut Self {
-        unsafe {
-            self.native_mut()
-                .drawRect(rect.as_ref().native(), paint.native())
-        }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawRect>
+    pub fn draw_rect(&self, rect: impl AsRef<Rect>, paint: &Paint) -> &Self {
+        unsafe { sb::SkCanvas_drawRect(self.native_ptr(), rect.as_ref().native(), paint.native()) }
         self
     }
 
@@ -1338,7 +1403,7 @@ impl Canvas {
     ///
     /// - `rect` rectangle to draw
     /// - `paint` stroke or fill, blend, color, and so on, used to draw
-    pub fn draw_irect(&mut self, rect: impl AsRef<IRect>, paint: &Paint) -> &mut Self {
+    pub fn draw_irect(&self, rect: impl AsRef<IRect>, paint: &Paint) -> &Self {
         self.draw_rect(Rect::from(*rect.as_ref()), paint)
     }
 
@@ -1350,12 +1415,9 @@ impl Canvas {
     /// - `region` region to draw
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawRegion
-    pub fn draw_region(&mut self, region: &Region, paint: &Paint) -> &mut Self {
-        unsafe {
-            self.native_mut()
-                .drawRegion(region.native(), paint.native())
-        }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawRegion>
+    pub fn draw_region(&self, region: &Region, paint: &Paint) -> &Self {
+        unsafe { sb::SkCanvas_drawRegion(self.native_ptr(), region.native(), paint.native()) }
         self
     }
 
@@ -1366,12 +1428,9 @@ impl Canvas {
     /// - `oval` [`Rect`] bounds of oval
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawOval
-    pub fn draw_oval(&mut self, oval: impl AsRef<Rect>, paint: &Paint) -> &mut Self {
-        unsafe {
-            self.native_mut()
-                .drawOval(oval.as_ref().native(), paint.native())
-        }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawOval>
+    pub fn draw_oval(&self, oval: impl AsRef<Rect>, paint: &Paint) -> &Self {
+        unsafe { sb::SkCanvas_drawOval(self.native_ptr(), oval.as_ref().native(), paint.native()) }
         self
     }
 
@@ -1385,11 +1444,10 @@ impl Canvas {
     /// - `rrect` [`RRect`] with up to eight corner radii to draw
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawRRect
-    pub fn draw_rrect(&mut self, rrect: impl AsRef<RRect>, paint: &Paint) -> &mut Self {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawRRect>
+    pub fn draw_rrect(&self, rrect: impl AsRef<RRect>, paint: &Paint) -> &Self {
         unsafe {
-            self.native_mut()
-                .drawRRect(rrect.as_ref().native(), paint.native())
+            sb::SkCanvas_drawRRect(self.native_ptr(), rrect.as_ref().native(), paint.native())
         }
         self
     }
@@ -1410,16 +1468,17 @@ impl Canvas {
     /// - `inner` [`RRect`] inner bounds to draw
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawDRRect_a
-    /// example: https://fiddle.skia.org/c/@Canvas_drawDRRect_b
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawDRRect_a>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawDRRect_b>
     pub fn draw_drrect(
-        &mut self,
+        &self,
         outer: impl AsRef<RRect>,
         inner: impl AsRef<RRect>,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().drawDRRect(
+            sb::SkCanvas_drawDRRect(
+                self.native_ptr(),
                 outer.as_ref().native(),
                 inner.as_ref().native(),
                 paint.native(),
@@ -1436,16 +1495,18 @@ impl Canvas {
     /// - `center` circle center
     /// - `radius` half the diameter of circle
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
-    pub fn draw_circle(
-        &mut self,
-        center: impl Into<Point>,
-        radius: scalar,
-        paint: &Paint,
-    ) -> &mut Self {
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawCircle>
+    pub fn draw_circle(&self, center: impl Into<Point>, radius: scalar, paint: &Paint) -> &Self {
         let center = center.into();
         unsafe {
-            self.native_mut()
-                .drawCircle(center.x, center.y, radius, paint.native())
+            sb::SkCanvas_drawCircle(
+                self.native_ptr(),
+                center.x,
+                center.y,
+                radius,
+                paint.native(),
+            )
         }
         self
     }
@@ -1470,15 +1531,16 @@ impl Canvas {
     /// - `use_center` if `true`, include the center of the oval
     /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
     pub fn draw_arc(
-        &mut self,
+        &self,
         oval: impl AsRef<Rect>,
         start_angle: scalar,
         sweep_angle: scalar,
         use_center: bool,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().drawArc(
+            sb::SkCanvas_drawArc(
+                self.native_ptr(),
                 oval.as_ref().native(),
                 start_angle,
                 sweep_angle,
@@ -1486,6 +1548,33 @@ impl Canvas {
                 paint.native(),
             )
         }
+        self
+    }
+
+    /// Draws arc using clip, [`Matrix`], and [`Paint`] paint.
+    ///
+    /// Arc is part of oval bounded by oval, sweeping from `start_angle` to `start_angle` plus
+    /// `sweep_angle`. `start_angle` and `sweep_angle` are in degrees.
+    ///
+    /// `start_angle` of zero places start point at the right middle edge of oval.
+    /// A positive `sweep_angle` places arc end point clockwise from start point;
+    /// a negative `sweep_angle` places arc end point counterclockwise from start point.
+    /// `sweep_angle` may exceed 360 degrees, a full circle.
+    /// If `use_center` is `true`, draw a wedge that includes lines from oval
+    /// center to arc end points. If `use_center` is `false`, draw arc between end points.
+    ///
+    /// If [`Rect`] oval is empty or `sweep_angle` is zero, nothing is drawn.
+    ///
+    /// - `arc` [`Arc`] specifying oval, startAngle, sweepAngle, and arc-vs-wedge
+    /// - `paint` [`Paint`] stroke or fill, blend, color, and so on, used to draw
+    pub fn draw_arc_2(&self, arc: &Arc, paint: &Paint) -> &Self {
+        self.draw_arc(
+            arc.oval,
+            arc.start_angle,
+            arc.sweep_angle,
+            arc.is_wedge(),
+            paint,
+        );
         self
     }
 
@@ -1504,17 +1593,22 @@ impl Canvas {
     /// - `ry` axis length on y-axis of oval describing rounded corners
     /// - `paint` stroke, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawRoundRect
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawRoundRect>
     pub fn draw_round_rect(
-        &mut self,
+        &self,
         rect: impl AsRef<Rect>,
         rx: scalar,
         ry: scalar,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut()
-                .drawRoundRect(rect.as_ref().native(), rx, ry, paint.native())
+            sb::SkCanvas_drawRoundRect(
+                self.native_ptr(),
+                rect.as_ref().native(),
+                rx,
+                ry,
+                paint.native(),
+            )
         }
         self
     }
@@ -1523,7 +1617,7 @@ impl Canvas {
     /// [`Path`] contains an array of path contour, each of which may be open or closed.
     ///
     /// In `paint`: [`crate::paint::Style`] determines if [`RRect`] is stroked or filled:
-    /// if filled, [`crate::path::FillType`] determines whether path contour describes inside or
+    /// if filled, [`crate::PathFillType`] determines whether path contour describes inside or
     /// outside of fill; if stroked, [`Paint`] stroke width describes the line thickness,
     /// [`crate::paint::Cap`] describes line ends, and [`crate::paint::Join`] describes how
     /// corners are drawn.
@@ -1531,29 +1625,29 @@ impl Canvas {
     /// - `path` [`Path`] to draw
     /// - `paint` stroke, blend, color, and so on, used to draw
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawPath
-    pub fn draw_path(&mut self, path: &Path, paint: &Paint) -> &mut Self {
-        unsafe { self.native_mut().drawPath(path.native(), paint.native()) }
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawPath>
+    pub fn draw_path(&self, path: &Path, paint: &Paint) -> &Self {
+        unsafe { sb::SkCanvas_drawPath(self.native_ptr(), path.native(), paint.native()) }
         self
     }
 
     pub fn draw_image(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         left_top: impl Into<Point>,
         paint: Option<&Paint>,
-    ) -> &mut Self {
+    ) -> &Self {
         let left_top = left_top.into();
         self.draw_image_with_sampling_options(image, left_top, SamplingOptions::default(), paint)
     }
 
     pub fn draw_image_rect(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         src: Option<(&Rect, SrcRectConstraint)>,
         dst: impl AsRef<Rect>,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         self.draw_image_rect_with_sampling_options(
             image,
             src,
@@ -1564,15 +1658,16 @@ impl Canvas {
     }
 
     pub fn draw_image_with_sampling_options(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         left_top: impl Into<Point>,
         sampling: impl Into<SamplingOptions>,
         paint: Option<&Paint>,
-    ) -> &mut Self {
+    ) -> &Self {
         let left_top = left_top.into();
         unsafe {
-            self.native_mut().drawImage(
+            sb::SkCanvas_drawImage(
+                self.native_ptr(),
                 image.as_ref().native(),
                 left_top.x,
                 left_top.y,
@@ -1584,17 +1679,18 @@ impl Canvas {
     }
 
     pub fn draw_image_rect_with_sampling_options(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         src: Option<(&Rect, SrcRectConstraint)>,
         dst: impl AsRef<Rect>,
         sampling: impl Into<SamplingOptions>,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         let sampling = sampling.into();
         match src {
             Some((src, constraint)) => unsafe {
-                self.native_mut().drawImageRect(
+                sb::SkCanvas_drawImageRect(
+                    self.native_ptr(),
                     image.as_ref().native(),
                     src.native(),
                     dst.as_ref().native(),
@@ -1604,7 +1700,8 @@ impl Canvas {
                 )
             },
             None => unsafe {
-                self.native_mut().drawImageRect1(
+                sb::SkCanvas_drawImageRect1(
+                    self.native_ptr(),
                     image.as_ref().native(),
                     dst.as_ref().native(),
                     sampling.native(),
@@ -1638,15 +1735,16 @@ impl Canvas {
     /// - `paint` [`Paint`] containing [`BlendMode`], [`crate::ColorFilter`], [`ImageFilter`],
     ///    and so on; or `None`
     pub fn draw_image_nine(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         center: impl AsRef<IRect>,
         dst: impl AsRef<Rect>,
         filter_mode: FilterMode,
         paint: Option<&Paint>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().drawImageNine(
+            sb::SkCanvas_drawImageNine(
+                self.native_ptr(),
                 image.as_ref().native(),
                 center.as_ref().native(),
                 dst.as_ref().native(),
@@ -1682,17 +1780,18 @@ impl Canvas {
     /// - `dst` destination [`Rect`] of image to draw to
     /// - `filter` what technique to use when sampling the image
     /// - `paint` [`Paint`] containing [`BlendMode`], [`crate::ColorFilter`], [`ImageFilter`],
-    /// and so on; or `None`
+    ///   and so on; or `None`
     pub fn draw_image_lattice(
-        &mut self,
+        &self,
         image: impl AsRef<Image>,
         lattice: &Lattice,
         dst: impl AsRef<Rect>,
         filter: FilterMode,
         paint: Option<&Paint>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().drawImageLattice(
+            sb::SkCanvas_drawImageLattice(
+                self.native_ptr(),
                 image.as_ref().native(),
                 &lattice.native().native,
                 dst.as_ref().native(),
@@ -1725,18 +1824,19 @@ impl Canvas {
     /// - `font` typeface, text size and so, used to describe the text
     /// - `paint` blend, color, and so on, used to draw
     pub fn draw_str(
-        &mut self,
+        &self,
         str: impl AsRef<str>,
         origin: impl Into<Point>,
         font: &Font,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         // rust specific, based on drawSimpleText with fixed UTF8 encoding,
         // implementation is similar to Font's *_str methods.
         let origin = origin.into();
         let bytes = str.as_ref().as_bytes();
         unsafe {
-            self.native_mut().drawSimpleText(
+            sb::SkCanvas_drawSimpleText(
+                self.native_ptr(),
                 bytes.as_ptr() as _,
                 bytes.len(),
                 TextEncoding::UTF8.into_native(),
@@ -1747,6 +1847,132 @@ impl Canvas {
             )
         }
         self
+    }
+
+    /// Draws glyphs at positions relative to `origin` styled with `font` and `paint` with
+    /// supporting utf8 and cluster information.
+    ///
+    /// This function draw glyphs at the given positions relative to the given origin. It does not
+    /// perform typeface fallback for glyphs not found in the [`crate::Typeface`] in font.
+    ///
+    /// The drawing obeys the current transform matrix and clipping.
+    ///
+    /// All elements of paint: [`crate::PathEffect`], [`crate::MaskFilter`], [`Shader`],
+    /// [`crate::ColorFilter`], and [`ImageFilter`]; apply to text. By default, draws filled black
+    /// glyphs.
+    ///
+    /// - `count`           number of glyphs to draw
+    /// - `glyphs`          the array of glyphIDs to draw
+    /// - `positions`       where to draw each glyph relative to origin
+    /// - `clusters`        array of size count of cluster information
+    /// - `utf8_text`       utf8text supporting information for the glyphs
+    /// - `origin`          the origin of all the positions
+    /// - `font`            typeface, text size and so, used to describe the text
+    /// - `paint`           blend, color, and so on, used to draw
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_glyphs_utf8(
+        &self,
+        glyphs: &[GlyphId],
+        positions: &[Point],
+        clusters: &[u32],
+        utf8_text: impl AsRef<str>,
+        origin: impl Into<Point>,
+        font: &Font,
+        paint: &Paint,
+    ) {
+        let count = glyphs.len();
+        if count == 0 {
+            return;
+        }
+        assert_eq!(positions.len(), count);
+        assert_eq!(clusters.len(), count);
+        let utf8_text = utf8_text.as_ref().as_bytes();
+        let origin = origin.into();
+        unsafe {
+            sb::C_SkCanvas_drawGlyphs2(
+                self.native_ptr(),
+                glyphs.as_ptr(),
+                count,
+                positions.native().as_ptr(),
+                clusters.as_ptr(),
+                utf8_text.as_ptr() as _,
+                utf8_text.len(),
+                origin.into_native(),
+                font.native(),
+                paint.native(),
+            )
+        }
+    }
+
+    /// Draws `count` glyphs, at positions relative to `origin` styled with `font` and `paint`.
+    ///
+    /// This function draw glyphs at the given positions relative to the given origin.
+    /// It does not perform typeface fallback for glyphs not found in the [`crate::Typeface`]] in
+    /// font.
+    ///
+    /// The drawing obeys the current transform matrix and clipping.
+    ///
+    /// All elements of paint: [`crate::PathEffect`], [`crate::MaskFilter`], [`Shader`],
+    /// [`crate::ColorFilter`], and [`ImageFilter`]; apply to text. By default, draws filled black
+    /// glyphs.
+    ///
+    /// - `count`       number of glyphs to draw
+    /// - `glyphs`      the array of glyphIDs to draw
+    /// - `positions`   where to draw each glyph relative to origin, either a `&[Point]` or
+    ///                `&[RSXform]` slice
+    /// - `origin`      the origin of all the positions
+    /// - `font`        typeface, text size and so, used to describe the text
+    /// - `paint`       blend, color, and so on, used to draw
+    pub fn draw_glyphs_at<'a>(
+        &self,
+        glyphs: &[GlyphId],
+        positions: impl Into<GlyphPositions<'a>>,
+        origin: impl Into<Point>,
+        font: &Font,
+        paint: &Paint,
+    ) {
+        let count = glyphs.len();
+        if count == 0 {
+            return;
+        }
+        let positions: GlyphPositions = positions.into();
+        let origin = origin.into();
+
+        let glyphs = glyphs.as_ptr();
+        let origin = origin.into_native();
+        let font = font.native();
+        let paint = paint.native();
+
+        match positions {
+            GlyphPositions::Points(points) => {
+                assert_eq!(points.len(), count);
+                unsafe {
+                    sb::C_SkCanvas_drawGlyphs(
+                        self.native_ptr(),
+                        glyphs,
+                        count,
+                        points.native().as_ptr(),
+                        origin,
+                        font,
+                        paint,
+                    )
+                }
+            }
+            GlyphPositions::RSXforms(xforms) => {
+                assert_eq!(xforms.len(), count);
+                unsafe {
+                    sb::C_SkCanvas_drawGlyphsRSXform(
+                        self.native_ptr(),
+                        glyphs,
+                        count,
+                        xforms.native().as_ptr(),
+                        origin,
+                        font,
+                        paint,
+                    )
+                }
+            }
+        }
     }
 
     /// Draws [`TextBlob`] blob at `(origin.x, origin.y)`, using clip, [`Matrix`], and [`Paint`]
@@ -1766,15 +1992,20 @@ impl Canvas {
     /// - `blob` glyphs, positions, and their paints' text size, typeface, and so on
     /// - `origin` horizontal and vertical offset applied to blob
     /// - `paint` blend, color, stroking, and so on, used to draw
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawTextBlob>
     pub fn draw_text_blob(
-        &mut self,
+        &self,
         blob: impl AsRef<TextBlob>,
         origin: impl Into<Point>,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
         let origin = origin.into();
+        #[cfg(all(feature = "textlayout", feature = "embed-icudtl"))]
+        crate::icu::init();
         unsafe {
-            self.native_mut().drawTextBlob(
+            sb::SkCanvas_drawTextBlob(
+                self.native_ptr(),
                 blob.as_ref().native(),
                 origin.x,
                 origin.y,
@@ -1795,14 +2026,17 @@ impl Canvas {
     /// - `picture` recorded drawing commands to play
     /// - `matrix` [`Matrix`] to rotate, scale, translate, and so on; may be `None`
     /// - `paint` [`Paint`] to apply transparency, filtering, and so on; may be `None`
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawPicture_3>
     pub fn draw_picture(
-        &mut self,
+        &self,
         picture: impl AsRef<Picture>,
         matrix: Option<&Matrix>,
         paint: Option<&Paint>,
-    ) -> &mut Self {
+    ) -> &Self {
         unsafe {
-            self.native_mut().drawPicture(
+            sb::SkCanvas_drawPicture(
+                self.native_ptr(),
                 picture.as_ref().native(),
                 matrix.native_ptr_or_null(),
                 paint.native_ptr_or_null(),
@@ -1815,25 +2049,62 @@ impl Canvas {
     /// If `paint` contains an [`Shader`] and vertices does not contain tex coords, the shader is
     /// mapped using the vertices' positions.
     ///
-    /// If vertices colors are defined in vertices, and [`Paint`] `paint` contains [`Shader`],
-    /// [`BlendMode`] mode combines vertices colors with [`Shader`].
+    /// [`BlendMode`] is ignored if [`Vertices`] does not have colors. Otherwise, it combines
+    ///   - the [`Shader`] if [`Paint`] contains [`Shader`
+    ///   - or the opaque [`Paint`] color if [`Paint`] does not contain [`Shader`]
     ///
+    /// as the src of the blend and the interpolated vertex colors as the dst.
+    ///
+    /// [`crate::MaskFilter`], [`crate::PathEffect`], and antialiasing on [`Paint`] are ignored.
+    //
     /// - `vertices` triangle mesh to draw
-    /// - `mode` combines vertices colors with [`Shader`], if both are present
-    /// - `paint` specifies the [`Shader`], used as [`Vertices`] texture, may be `None`
+    /// - `mode` combines vertices' colors with [`Shader`] if present or [`Paint`] opaque color if
+    ///   not. Ignored if the vertices do not contain color.
+    /// - `paint` specifies the [`Shader`], used as [`Vertices`] texture, and
+    ///   [`crate::ColorFilter`].
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawVertices_2
-    pub fn draw_vertices(
-        &mut self,
-        vertices: &Vertices,
-        mode: impl Into<Option<BlendMode>>,
-        paint: Option<&Paint>,
-    ) -> &mut Self {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawVertices>
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawVertices_2>
+    pub fn draw_vertices(&self, vertices: &Vertices, mode: BlendMode, paint: &Paint) -> &Self {
         unsafe {
-            self.native_mut().drawVertices(
-                vertices.native(),
-                mode.into().unwrap_or(BlendMode::Modulate),
-                paint.native_ptr_or_null(),
+            sb::SkCanvas_drawVertices(self.native_ptr(), vertices.native(), mode, paint.native())
+        }
+        self
+    }
+
+    /// Experimental, under active development, and subject to change without notice.
+    ///
+    /// Draws a mesh using a user-defined specification (see [`crate::MeshSpecification`]).
+    /// Requires a GPU backend or SkSL to be compiled in.
+    ///
+    /// [`Blender`] is ignored if [`Mesh`]'s specification does not output fragment shader color.
+    /// Otherwise, it combines
+    /// - the [`Shader`] if [`Paint`] contains [`Shader`]
+    /// - or the opaque [`Paint`] color if [`Paint`] does not contain [`Shader`]
+    ///
+    /// as the src of the blend and the mesh's fragment color as the dst.
+    ///
+    /// [`crate::MaskFilter`], [`crate::PathEffect`], and antialiasing on [`Paint`] are ignored.
+    ///
+    /// Note: The raster, PDF, and SVG backends ignore meshes; Ganesh and Graphite draw them.
+    ///
+    /// - `mesh` the mesh vertices and compatible specification.
+    /// - `blender` combines vertices colors with [`Shader`] if present or [`Paint`] opaque color
+    ///   if not. Ignored if the custom mesh does not output color. Defaults to
+    ///   [`BlendMode::Modulate`] if `None`.
+    /// - `paint` specifies the [`Shader`], used as [`Vertices`] texture
+    pub fn draw_mesh(
+        &self,
+        mesh: &Mesh,
+        blender: impl Into<Option<Blender>>,
+        paint: &Paint,
+    ) -> &Self {
+        unsafe {
+            sb::C_SkCanvas_drawMesh(
+                self.native_ptr(),
+                mesh.native(),
+                blender.into().into_ptr_or_null(),
+                paint.native(),
             )
         }
         self
@@ -1841,11 +2112,6 @@ impl Canvas {
 
     /// Draws a Coons patch: the interpolation of four cubics with shared corners,
     /// associating a color, and optionally a texture [`Point`], with each corner.
-    ///
-    /// Coons patch uses clip and [`Matrix`], `paint` [`Shader`], [`crate::ColorFilter`],
-    /// alpha, [`ImageFilter`], and [`BlendMode`]. If [`Shader`] is provided it is treated
-    /// as Coons patch texture; [`BlendMode`] mode combines color colors and [`Shader`] if
-    /// both are provided.
     ///
     /// [`Point`] array cubics specifies four [`Path`] cubic starting at the top-left corner,
     /// in clockwise order, sharing every fourth point. The last [`Path`] cubic ends at the
@@ -1858,35 +2124,103 @@ impl Canvas {
     /// corners in top-left, top-right, bottom-right, bottom-left order. If `tex_coords` is
     /// `None`, [`Shader`] is mapped using positions (derived from cubics).
     ///
+    /// [`BlendMode`] is ignored if colors is `None`. Otherwise, it combines
+    ///   - the [`Shader`] if [`Paint`] contains [`Shader`]
+    ///   - or the opaque [`Paint`] color if [`Paint`] does not contain [`Shader`]
+    ///
+    /// as the src of the blend and the interpolated patch colors as the dst.
+    ///
+    /// [`crate::MaskFilter`], [`crate::PathEffect`], and antialiasing on [`Paint`] are ignored.
+    ///
     /// - `cubics` [`Path`] cubic array, sharing common points
     /// - `colors` color array, one for each corner
     /// - `tex_coords` [`Point`] array of texture coordinates, mapping [`Shader`] to corners;
     ///   may be `None`
-    /// - `mode` [`BlendMode`] for colors, and for [`Shader`] if `paint` has one
+    /// - `mode` combines patch's colors with [`Shader`] if present or [`Paint`] opaque color if
+    ///    not. Ignored if colors is `None`.
     /// - `paint` [`Shader`], [`crate::ColorFilter`], [`BlendMode`], used to draw
-    pub fn draw_patch(
-        &mut self,
+    pub fn draw_patch<'a>(
+        &self,
         cubics: &[Point; 12],
-        colors: &[Color; 4],
+        colors: impl Into<Option<&'a [Color; 4]>>,
         tex_coords: Option<&[Point; 4]>,
-        mode: impl Into<Option<BlendMode>>,
+        mode: BlendMode,
         paint: &Paint,
-    ) -> &mut Self {
+    ) -> &Self {
+        let colors = colors
+            .into()
+            .map(|c| c.native().as_ptr())
+            .unwrap_or(ptr::null());
         unsafe {
-            self.native_mut().drawPatch(
+            sb::SkCanvas_drawPatch(
+                self.native_ptr(),
                 cubics.native().as_ptr(),
-                colors.native().as_ptr(),
+                colors,
                 tex_coords
                     .map(|tc| tc.native().as_ptr())
                     .unwrap_or(ptr::null()),
-                mode.into().unwrap_or(BlendMode::Modulate),
+                mode,
                 paint.native(),
             )
         }
         self
     }
 
-    // TODO: drawAtlas
+    /// Draws a set of sprites from atlas, using clip, [`Matrix`], and optional [`Paint`] paint.
+    /// paint uses anti-alias, alpha, [`crate::ColorFilter`], [`ImageFilter`], and [`BlendMode`]
+    /// to draw, if present. For each entry in the array, [`Rect`] tex locates sprite in
+    /// atlas, and [`RSXform`] xform transforms it into destination space.
+    ///
+    /// [`crate::MaskFilter`] and [`crate::PathEffect`] on paint are ignored.
+    ///
+    /// xform, tex, and colors if present, must contain the same number of entries.
+    /// Optional colors are applied for each sprite using [`BlendMode`] mode, treating
+    /// sprite as source and colors as destination.
+    /// Optional `cull_rect` is a conservative bounds of all transformed sprites.
+    /// If `cull_rect` is outside of clip, canvas can skip drawing.
+    ///
+    /// * `atlas` - [`Image`] containing sprites
+    /// * `xform` - [`RSXform`] mappings for sprites in atlas
+    /// * `tex` - [`Rect`] locations of sprites in atlas
+    /// * `colors` - one per sprite, blended with sprite using [`BlendMode`]; may be `None`
+    /// * `count` - number of sprites to draw
+    /// * `mode` - [`BlendMode`] combining colors and sprites
+    /// * `sampling` - [`SamplingOptions`] used when sampling from the atlas image
+    /// * `cull_rect` - bounds of transformed sprites for efficient clipping; may be `None`
+    /// * `paint` - [`crate::ColorFilter`], [`ImageFilter`], [`BlendMode`], and so on; may be `None`
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_atlas<'a>(
+        &self,
+        atlas: &Image,
+        xform: &[RSXform],
+        tex: &[Rect],
+        colors: impl Into<Option<&'a [Color]>>,
+        mode: BlendMode,
+        sampling: impl Into<SamplingOptions>,
+        cull_rect: impl Into<Option<Rect>>,
+        paint: impl Into<Option<&'a Paint>>,
+    ) {
+        let count = xform.len();
+        assert_eq!(tex.len(), count);
+        let colors = colors.into();
+        if let Some(color_slice) = colors {
+            assert_eq!(color_slice.len(), count);
+        }
+        unsafe {
+            sb::C_SkCanvas_drawAtlas(
+                self.native_ptr(),
+                atlas.native(),
+                xform.native().as_ptr(),
+                count,
+                tex.native().as_ptr(),
+                colors.native().as_ptr_or_null(),
+                mode,
+                sampling.into().native(),
+                cull_rect.into().native().as_ptr_or_null(),
+                paint.into().native_ptr_or_null(),
+            )
+        }
+    }
 
     /// Draws [`Drawable`] drawable using clip and [`Matrix`], concatenated with
     /// optional matrix.
@@ -1899,11 +2233,14 @@ impl Canvas {
     /// - `drawable` custom struct encapsulating drawing commands
     /// - `matrix` transformation applied to drawing; may be `None`
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawDrawable
-    pub fn draw_drawable(&mut self, drawable: &mut Drawable, matrix: Option<&Matrix>) {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawDrawable>
+    pub fn draw_drawable(&self, drawable: &mut Drawable, matrix: Option<&Matrix>) {
         unsafe {
-            self.native_mut()
-                .drawDrawable(drawable.native_mut(), matrix.native_ptr_or_null())
+            sb::SkCanvas_drawDrawable(
+                self.native_ptr(),
+                drawable.native_mut(),
+                matrix.native_ptr_or_null(),
+            )
         }
     }
 
@@ -1917,12 +2254,11 @@ impl Canvas {
     /// - `drawable` custom struct encapsulating drawing commands
     /// - `offset` offset into [`Canvas`] writable pixels on x,y-axis
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_drawDrawable_2
-    pub fn draw_drawable_at(&mut self, drawable: &mut Drawable, offset: impl Into<Point>) {
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawDrawable_2>
+    pub fn draw_drawable_at(&self, drawable: &mut Drawable, offset: impl Into<Point>) {
         let offset = offset.into();
         unsafe {
-            self.native_mut()
-                .drawDrawable1(drawable.native_mut(), offset.x, offset.y)
+            sb::SkCanvas_drawDrawable1(self.native_ptr(), drawable.native_mut(), offset.x, offset.y)
         }
     }
 
@@ -1935,15 +2271,13 @@ impl Canvas {
     /// - `rect` [`Rect`] extent of canvas to annotate
     /// - `key` string used for lookup
     /// - `value` data holding value stored in annotation
-    pub fn draw_annotation(
-        &mut self,
-        rect: impl AsRef<Rect>,
-        key: &str,
-        value: &Data,
-    ) -> &mut Self {
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_drawAnnotation_2>
+    pub fn draw_annotation(&self, rect: impl AsRef<Rect>, key: &str, value: &Data) -> &Self {
         let key = CString::new(key).unwrap();
         unsafe {
-            self.native_mut().drawAnnotation(
+            sb::SkCanvas_drawAnnotation(
+                self.native_ptr(),
                 rect.as_ref().native(),
                 key.as_ptr(),
                 value.native_mut_force(),
@@ -1959,7 +2293,7 @@ impl Canvas {
     ///
     /// Returns `true` if clip is empty
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_isClipEmpty
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_isClipEmpty>
     pub fn is_clip_empty(&self) -> bool {
         unsafe { sb::C_SkCanvas_isClipEmpty(self.native()) }
     }
@@ -1969,7 +2303,7 @@ impl Canvas {
     ///
     /// Returns `true` if clip is [`Rect`] and not empty
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_isClipRect
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_isClipRect>
     pub fn is_clip_rect(&self) -> bool {
         unsafe { sb::C_SkCanvas_isClipRect(self.native()) }
     }
@@ -1993,8 +2327,8 @@ impl Canvas {
     ///
     /// Returns 3x3 version of [`Self::local_to_device()`]
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_getTotalMatrix
-    /// example: https://fiddle.skia.org/c/@Clip
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_getTotalMatrix>
+    /// Example (C++): <https://fiddle.skia.org/c/@Clip>
     #[deprecated(
         since = "0.38.0",
         note = "use local_to_device() or local_to_device_as_3x3() instead"
@@ -2012,7 +2346,7 @@ impl Canvas {
     pub(crate) fn own_from_native_ptr<'lt>(native: *mut SkCanvas) -> Option<OwnedCanvas<'lt>> {
         if !native.is_null() {
             Some(OwnedCanvas::<'lt>(
-                ptr::NonNull::new(Self::borrow_from_native_mut(unsafe { &mut *native })).unwrap(),
+                ptr::NonNull::new(native.cast::<Canvas>()).unwrap(),
                 PhantomData,
             ))
         } else {
@@ -2020,12 +2354,18 @@ impl Canvas {
         }
     }
 
-    pub(crate) fn borrow_from_native(native: &SkCanvas) -> &Self {
-        unsafe { transmute_ref(native) }
-    }
-
-    pub(crate) fn borrow_from_native_mut(native: &mut SkCanvas) -> &mut Self {
-        unsafe { transmute_ref_mut(native) }
+    /// Borrows a native canvas as a [`Canvas`].
+    ///
+    /// This function takes a raw pointer instead of a `&SkCanvas`. A shared reference to
+    /// `SkCanvas` would forbid writes to the canvas memory, but drawing writes to it. [`Canvas`]
+    /// wraps the native canvas in an [`UnsafeCell`], so a `&Canvas` created directly from the
+    /// pointer permits these writes.
+    ///
+    /// # Safety
+    ///
+    /// `native` must point to a live `SkCanvas` that stays alive for `'a`.
+    pub(crate) unsafe fn borrow_from_native<'a>(native: *mut SkCanvas) -> &'a Self {
+        unsafe { &*native.cast::<Self>() }
     }
 }
 
@@ -2036,9 +2376,10 @@ impl QuickReject<Rect> for Canvas {
     /// Use to check if an area to be drawn is clipped out, to skip subsequent draw calls.
     ///
     /// - `rect` [`Rect`] to compare with clip
+    ///
     /// Returns `true` if `rect`, transformed by [`Matrix`], does not intersect clip
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_quickReject
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_quickReject>
     fn quick_reject(&self, rect: &Rect) -> bool {
         unsafe { self.native().quickReject(rect.native()) }
     }
@@ -2051,9 +2392,10 @@ impl QuickReject<Path> for Canvas {
     /// Use to check if an area to be drawn is clipped out, to skip subsequent draw calls.
     ///
     /// - `path` [`Path`] to compare with clip
+    ///
     /// Returns `true` if `path`, transformed by [`Matrix`], does not intersect clip
     ///
-    /// example: https://fiddle.skia.org/c/@Canvas_quickReject_2
+    /// Example (C++): <https://fiddle.skia.org/c/@Canvas_quickReject_2>
     fn quick_reject(&self, path: &Path) -> bool {
         unsafe { self.native().quickReject1(path.native()) }
     }
@@ -2062,13 +2404,13 @@ impl QuickReject<Path> for Canvas {
 pub trait SetMatrix {
     /// DEPRECATED -- use [`M44`] version
     #[deprecated(since = "0.38.0", note = "Use M44 version")]
-    fn set_matrix(&mut self, matrix: &Matrix) -> &mut Self;
+    fn set_matrix(&self, matrix: &Matrix) -> &Self;
 }
 
 impl SetMatrix for Canvas {
     /// DEPRECATED -- use [`M44`] version
-    fn set_matrix(&mut self, matrix: &Matrix) -> &mut Self {
-        unsafe { self.native_mut().setMatrix1(matrix.native()) }
+    fn set_matrix(&self, matrix: &Matrix) -> &Self {
+        unsafe { sb::SkCanvas_setMatrix1(self.native_ptr(), matrix.native()) }
         self
     }
 }
@@ -2078,10 +2420,11 @@ impl SetMatrix for Canvas {
 //
 
 pub mod lattice {
-    use crate::prelude::*;
-    use crate::{Color, IRect};
-    use skia_bindings as sb;
-    use skia_bindings::SkCanvas_Lattice;
+    //! Divides a [`crate::Bitmap`] or [`crate::Image`] into a rectangular grid for
+    //! [`crate::Canvas::draw_image_lattice()`]; grid entries on even columns and rows are fixed,
+    //! the remaining entries scale to fit.
+    use crate::{Color, IRect, prelude::*};
+    use skia_bindings::{self as sb, SkCanvas_Lattice};
     use std::marker::PhantomData;
 
     /// [`Lattice`] divides [`crate::Bitmap`] or [`crate::Image`] into a rectangular grid.
@@ -2111,7 +2454,7 @@ pub mod lattice {
         pd: PhantomData<&'a Lattice<'a>>,
     }
 
-    impl<'a> Lattice<'a> {
+    impl Lattice<'_> {
         pub(crate) fn native(&self) -> Ref {
             if let Some(rect_types) = self.rect_types {
                 let rect_count = (self.x_divs.len() + 1) * (self.y_divs.len() + 1);
@@ -2142,53 +2485,48 @@ pub mod lattice {
     /// Optional setting per rectangular grid entry to make it transparent,
     /// or to fill the grid entry with a color.
     pub use sb::SkCanvas_Lattice_RectType as RectType;
-
-    #[test]
-    fn test_lattice_rect_type_naming() {
-        let _ = RectType::FixedColor;
-    }
+    variant_name!(RectType::FixedColor);
 }
 
+#[must_use]
 #[derive(Debug)]
 /// Stack helper class calls [`Canvas::restore_to_count()`] when [`AutoCanvasRestore`]
 /// goes out of scope. Use this to guarantee that the canvas is restored to a known
 /// state.
 pub struct AutoRestoredCanvas<'a> {
-    canvas: &'a mut Canvas,
+    canvas: &'a Canvas,
     restore: SkAutoCanvasRestore,
 }
 
-impl<'a> Deref for AutoRestoredCanvas<'a> {
+impl Deref for AutoRestoredCanvas<'_> {
     type Target = Canvas;
     fn deref(&self) -> &Self::Target {
         self.canvas
     }
 }
 
-impl<'a> DerefMut for AutoRestoredCanvas<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.canvas
-    }
-}
+impl NativeAccess for AutoRestoredCanvas<'_> {
+    type Native = SkAutoCanvasRestore;
 
-impl<'a> NativeAccess<SkAutoCanvasRestore> for AutoRestoredCanvas<'a> {
     fn native(&self) -> &SkAutoCanvasRestore {
         &self.restore
     }
+}
 
+impl NativeAccessMut for AutoRestoredCanvas<'_> {
     fn native_mut(&mut self) -> &mut SkAutoCanvasRestore {
         &mut self.restore
     }
 }
 
-impl<'a> Drop for AutoRestoredCanvas<'a> {
+impl Drop for AutoRestoredCanvas<'_> {
     /// Restores [`Canvas`] to saved state. Drop is called when container goes out of scope.
     fn drop(&mut self) {
         unsafe { sb::C_SkAutoCanvasRestore_destruct(self.native_mut()) }
     }
 }
 
-impl<'a> AutoRestoredCanvas<'a> {
+impl AutoRestoredCanvas<'_> {
     /// Restores [`Canvas`] to saved state immediately. Subsequent calls and [`Self::drop()`] have
     /// no effect.
     pub fn restore(&mut self) {
@@ -2204,10 +2542,11 @@ impl AutoCanvasRestore {
     ///
     /// - `canvas` [`Canvas`] to guard
     /// - `do_save` call [`Canvas::save()`]
+    ///
     /// Returns utility to restore [`Canvas`] state on destructor
-    pub fn guard(canvas: &mut Canvas, do_save: bool) -> AutoRestoredCanvas {
+    pub fn guard(canvas: &Canvas, do_save: bool) -> AutoRestoredCanvas {
         let restore = construct(|acr| unsafe {
-            sb::C_SkAutoCanvasRestore_Construct(acr, canvas.native_mut(), do_save)
+            sb::C_SkAutoCanvasRestore_Construct(acr, canvas.native_ptr(), do_save)
         });
 
         AutoRestoredCanvas { canvas, restore }
@@ -2217,8 +2556,8 @@ impl AutoCanvasRestore {
 #[cfg(test)]
 mod tests {
     use crate::{
-        canvas::SaveLayerFlags, canvas::SaveLayerRec, AlphaType, Canvas, ClipOp, Color, ColorType,
-        ImageInfo, OwnedCanvas, Rect,
+        AlphaType, Canvas, ClipOp, Color, ColorType, ImageInfo, OwnedCanvas, Rect,
+        canvas::SaveLayerFlags, canvas::SaveLayerRec, surfaces,
     };
 
     #[test]
@@ -2227,7 +2566,7 @@ mod tests {
         assert_eq!(8, info.min_row_bytes());
         let mut bytes: [u8; 8 * 2] = Default::default();
         {
-            let mut canvas = Canvas::from_raster_direct(&info, bytes.as_mut(), None, None).unwrap();
+            let canvas = Canvas::from_raster_direct(&info, bytes.as_mut(), None, None).unwrap();
             canvas.clear(Color::RED);
         }
 
@@ -2241,7 +2580,7 @@ mod tests {
     fn test_raster_direct_n32_creation_and_clear_in_memory() {
         let mut pixels: [u32; 4] = Default::default();
         {
-            let mut canvas = Canvas::from_raster_direct_n32((2, 2), pixels.as_mut(), None).unwrap();
+            let canvas = Canvas::from_raster_direct_n32((2, 2), pixels.as_mut(), None).unwrap();
             canvas.clear(Color::RED);
         }
 
@@ -2268,20 +2607,20 @@ mod tests {
     #[test]
     fn test_make_surface() {
         let mut pixels: [u32; 4] = Default::default();
-        let mut canvas = Canvas::from_raster_direct_n32((2, 2), pixels.as_mut(), None).unwrap();
+        let canvas = Canvas::from_raster_direct_n32((2, 2), pixels.as_mut(), None).unwrap();
         let ii = canvas.image_info();
         let mut surface = canvas.new_surface(&ii, None).unwrap();
-        dbg!(&mut canvas as *mut _);
+        dbg!(&canvas as *const _);
         drop(canvas);
 
         let canvas = surface.canvas();
-        dbg!(canvas as *mut _);
+        dbg!(canvas as *const _);
         canvas.clear(Color::RED);
     }
 
     #[test]
     fn clip_options_overloads() {
-        let mut c = OwnedCanvas::default();
+        let c = OwnedCanvas::default();
         // do_anti_alias
         c.clip_rect(Rect::default(), None, true);
         // clip_op
@@ -2290,10 +2629,11 @@ mod tests {
         c.clip_rect(Rect::default(), ClipOp::Difference, true);
     }
 
-    /// Regression test for: https://github.com/rust-skia/rust-skia/issues/427
+    /// Regression test for: <https://github.com/rust-skia/rust-skia/issues/427>
     #[test]
     fn test_local_and_device_clip_bounds() {
-        let mut surface = crate::Surface::new_raster_n32_premul((100, 100)).unwrap();
+        let mut surface =
+            surfaces::raster(&ImageInfo::new_n32_premul((100, 100), None), 0, None).unwrap();
         let _ = surface.canvas().device_clip_bounds();
         let _ = surface.canvas().local_clip_bounds();
         let _ = surface.canvas().local_to_device();

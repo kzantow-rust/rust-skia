@@ -1,8 +1,20 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
-    "skia-bindings",
     "skia-safe",
+    "skia-svg-macros",
+    "skia-bindings",
+    "skia-wgpu",
     "skia-org",
-	"mk-workflows"
+    "skia-icon",
+    "mk-workflows",
 ]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+
+[profile.release]
+# Catch LTO-only regressions in CI, like the dropped ICU data in
+# https://github.com/rust-skia/rust-skia/issues/565
+lto = "thin"

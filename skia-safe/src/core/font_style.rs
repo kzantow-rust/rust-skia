@@ -1,3 +1,5 @@
+//! Describes the style of a font: weight, width, and slant.
+
 use crate::prelude::*;
 use skia_bindings::{self as sb, SkFontStyle, SkFontStyle_Weight, SkFontStyle_Width};
 use std::{fmt, ops::Deref};
@@ -6,16 +8,11 @@ use std::{fmt, ops::Deref};
 ///
 /// Use Weight::from() to create a weight from an i32.
 /// Use *weight to pull out the wrapped value of the Weight.
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct Weight(i32);
 
-impl NativeTransmutable<i32> for Weight {}
-
-#[test]
-fn test_weight_layout() {
-    Weight::test_layout()
-}
+native_transmutable!(i32, Weight);
 
 impl From<i32> for Weight {
     fn from(weight: i32) -> Self {
@@ -49,16 +46,11 @@ impl Weight {
 ///
 /// To create a width of a font from an i32, use Width::from().
 /// To access the underlying value of the font weight, dereference *weight.
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct Width(i32);
 
-impl NativeTransmutable<i32> for Width {}
-
-#[test]
-fn test_width_layout() {
-    Width::test_layout()
-}
+native_transmutable!(i32, Width);
 
 impl From<i32> for Width {
     fn from(width: i32) -> Self {
@@ -87,21 +79,14 @@ impl Width {
 }
 
 pub use skia_bindings::SkFontStyle_Slant as Slant;
-#[test]
-fn test_slant_naming() {
-    let _ = Slant::Upright;
-}
+variant_name!(Slant::Upright);
 
 // TODO: implement Display
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct FontStyle(SkFontStyle);
 
-impl NativeTransmutable<SkFontStyle> for FontStyle {}
-#[test]
-fn test_font_style_layout() {
-    FontStyle::test_layout()
-}
+native_transmutable!(SkFontStyle, FontStyle);
 
 impl PartialEq for FontStyle {
     fn eq(&self, rhs: &Self) -> bool {
@@ -162,18 +147,18 @@ impl FontStyle {
 }
 
 mod font_style_static {
+    use std::sync::LazyLock;
+
     use super::{FontStyle, Slant, Weight, Width};
 
-    lazy_static! {
-        pub static ref NORMAL: FontStyle =
-            FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Upright);
-        pub static ref BOLD: FontStyle =
-            FontStyle::new(Weight::BOLD, Width::NORMAL, Slant::Upright);
-        pub static ref ITALIC: FontStyle =
-            FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Italic);
-        pub static ref BOLD_ITALIC: FontStyle =
-            FontStyle::new(Weight::BOLD, Width::NORMAL, Slant::Italic);
-    }
+    pub static NORMAL: LazyLock<FontStyle> =
+        LazyLock::new(|| FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Upright));
+    pub static BOLD: LazyLock<FontStyle> =
+        LazyLock::new(|| FontStyle::new(Weight::BOLD, Width::NORMAL, Slant::Upright));
+    pub static ITALIC: LazyLock<FontStyle> =
+        LazyLock::new(|| FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Italic));
+    pub static BOLD_ITALIC: LazyLock<FontStyle> =
+        LazyLock::new(|| FontStyle::new(Weight::BOLD, Width::NORMAL, Slant::Italic));
 }
 
 #[test]

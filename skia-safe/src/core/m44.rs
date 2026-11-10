@@ -1,14 +1,11 @@
-use crate::prelude::*;
-#[allow(deprecated)]
-use crate::{scalar, Matrix, Matrix44, Scalars};
-use bitflags::_core::ops::{AddAssign, MulAssign};
-use skia_bindings as sb;
-use skia_bindings::{SkM44, SkV2, SkV3, SkV4};
 use std::{
-    f32,
-    ops::{Add, Div, DivAssign, Index, Mul, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Div, DivAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
     slice,
 };
+
+use skia_bindings::{self as sb, SkM44, SkV2, SkV3, SkV4};
+
+use crate::{Matrix, Rect, prelude::*, private::is_finite, scalar};
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
@@ -17,12 +14,7 @@ pub struct V2 {
     pub y: f32,
 }
 
-impl NativeTransmutable<SkV2> for V2 {}
-
-#[test]
-fn test_v2_layout() {
-    V2::test_layout();
-}
+native_transmutable!(SkV2, V2);
 
 impl V2 {
     pub const fn new(x: f32, y: f32) -> Self {
@@ -37,6 +29,7 @@ impl V2 {
         self.x * b.y - self.y * b.x
     }
 
+    #[must_use]
     pub fn normalize(self) -> Self {
         self * (1.0 / self.length())
     }
@@ -112,6 +105,14 @@ impl Mul<V2> for scalar {
     }
 }
 
+impl Div<V2> for scalar {
+    type Output = V2;
+
+    fn div(self, v: V2) -> Self::Output {
+        V2::new(self / v.x, self / v.y)
+    }
+}
+
 impl Div<scalar> for V2 {
     type Output = V2;
     fn div(self, s: scalar) -> Self::Output {
@@ -157,12 +158,7 @@ pub struct V3 {
     pub z: f32,
 }
 
-impl NativeTransmutable<SkV3> for V3 {}
-
-#[test]
-fn test_v3_layout() {
-    V3::test_layout();
-}
+native_transmutable!(SkV3, V3);
 
 impl V3 {
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
@@ -173,6 +169,7 @@ impl V3 {
         self.x * b.x + self.y * b.y + self.z * b.z
     }
 
+    #[must_use]
     pub fn cross(&self, b: &Self) -> Self {
         Self::new(
             self.y * b.z - self.z * b.y,
@@ -181,6 +178,7 @@ impl V3 {
         )
     }
 
+    #[must_use]
     pub fn normalize(&self) -> Self {
         *self * (1.0 / self.length())
     }
@@ -289,16 +287,27 @@ pub struct V4 {
     pub w: f32,
 }
 
-impl NativeTransmutable<SkV4> for V4 {}
-
-#[test]
-fn test_v4_layout() {
-    V4::test_layout();
-}
+native_transmutable!(SkV4, V4);
 
 impl V4 {
     pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
         Self { x, y, z, w }
+    }
+
+    pub fn length_squared(&self) -> scalar {
+        Self::dot(self, self)
+    }
+
+    pub fn length(&self) -> scalar {
+        scalar::sqrt(Self::dot(self, self))
+    }
+
+    pub fn dot(&self, b: &Self) -> scalar {
+        self.x * b.x + self.y * b.y + self.z * b.z + self.w * b.w
+    }
+
+    pub fn normalize(&self) -> Self {
+        (*self) * (1.0 / self.length())
     }
 
     const COMPONENTS: usize = 4;
@@ -396,18 +405,19 @@ impl Index<usize> for V4 {
     }
 }
 
+/// 4x4 matrix used by [`crate::Canvas`] and other parts of Skia.
+///
+/// Skia assumes a right-handed coordinate system:
+/// +X goes to the right
+/// +Y goes down
+/// +Z goes into the screen (away from the viewer)
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct M44 {
     mat: [f32; Self::COMPONENTS],
 }
 
-impl NativeTransmutable<SkM44> for M44 {}
-
-#[test]
-fn test_m44_layout() {
-    M44::test_layout()
-}
+native_transmutable!(SkM44, M44);
 
 impl Default for M44 {
     fn default() -> Self {
@@ -417,7 +427,7 @@ impl Default for M44 {
 
 impl PartialEq for M44 {
     fn eq(&self, other: &Self) -> bool {
-        unsafe { sb::C_SkM44_equals(self.native(), other.native()) }
+        unsafe { sb::C_SkM44_Equals(self.native(), other.native()) }
     }
 }
 
@@ -445,6 +455,7 @@ impl M44 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// The constructor parameters are in row-major order.
     pub const fn new(
         m0: scalar,
         m4: scalar,
@@ -518,6 +529,15 @@ impl M44 {
         let mut m = Self::default();
         m.set_rotate(axis, radians);
         m
+    }
+
+    /// Scales and translates `src` to fill `dst` exactly.
+    ///
+    /// - `src` source rectangle
+    /// - `dst` destination rectangle
+    pub fn rect_to_rect(src: impl AsRef<Rect>, dst: impl AsRef<Rect>) -> Self {
+        let (src, dst) = (src.as_ref(), dst.as_ref());
+        Self::construct(|m| unsafe { sb::C_SkM44_RectToRect(src.native(), dst.native(), m) })
     }
 
     pub fn look_at(eye: &V3, center: &V3, up: &V3) -> Self {
@@ -649,6 +669,15 @@ impl M44 {
         self
     }
 
+    /// Sets this matrix to rotate about the specified unit-length axis vector, by an angle
+    /// specified by its sin and cos.
+    ///
+    /// This does not attempt to verify that `axis.length() == 1` or that the sin, cos values are
+    /// correct.
+    ///
+    /// - `axis` unit-length axis vector
+    /// - `sin_angle` sine of the rotation angle
+    /// - `cos_angle` cosine of the rotation angle
     pub fn set_rotate_unit_sin_cos(
         &mut self,
         axis: V3,
@@ -662,10 +691,25 @@ impl M44 {
         self
     }
 
+    /// Sets this matrix to rotate about the specified unit-length axis vector, by an angle
+    /// specified in radians.
+    ///
+    /// This does not attempt to verify that `axis.length() == 1`.
+    ///
+    /// - `axis` unit-length axis vector
+    /// - `radians` rotation angle in radians
     pub fn set_rotate_unit(&mut self, axis: V3, radians: scalar) -> &mut Self {
         self.set_rotate_unit_sin_cos(axis, radians.sin(), radians.cos())
     }
 
+    /// Sets this matrix to rotate about the specified axis vector, by an angle specified in
+    /// radians.
+    ///
+    /// Note: `axis` is not assumed to be unit-length, so it will be normalized internally. If
+    /// `axis` is already unit-length, call [`Self::set_rotate_unit()`] instead.
+    ///
+    /// - `axis` axis vector
+    /// - `radians` rotation angle in radians
     pub fn set_rotate(&mut self, axis: V3, radians: scalar) -> &mut Self {
         unsafe { self.native_mut().setRotate(axis.into_native(), radians) };
         self
@@ -705,21 +749,37 @@ impl M44 {
         self
     }
 
+    /// A matrix is categorized as 'perspective' if the bottom row is not [0, 0, 0, 1]. For most
+    /// uses, a bottom row of [0, 0, 0, X] behaves like a non-perspective matrix, though it will be
+    /// categorized as perspective. Calling this will change the matrix such that, if its bottom row
+    /// was [0, 0, 0, X], it will be changed to [0, 0, 0, 1] by scaling the rest of the matrix by
+    /// 1/X.
+    ///
+    /// ```text
+    /// | A B C D |    | A/X B/X C/X D/X |
+    /// | E F G H | -> | E/X F/X G/X H/X |   for X != 0
+    /// | I J K L |    | I/X J/X K/X L/X |
+    /// | 0 0 0 X |    |  0   0   0   1  |
+    /// ```
     pub fn normalize_perspective(&mut self) {
         unsafe { self.native_mut().normalizePerspective() }
     }
 
+    /// Returns true if all elements of the matrix are finite. Returns false if any element is
+    /// infinity, or NaN.
     pub fn is_finite(&self) -> bool {
-        self.mat.are_finite()
+        is_finite(&self.mat)
     }
 
+    /// If this is invertible, returns `Some(inverse)`. If it is not invertible, returns `None`.
+    #[must_use]
     pub fn invert(&self) -> Option<M44> {
         let mut m = Self::default();
-        unsafe { self.native().invert(m.native_mut()) }.if_true_some(m)
+        unsafe { self.native().invert(m.native_mut()) }.then_some(m)
     }
 
-    #[warn(unused)]
-    pub fn transpose(&self) -> M44 {
+    #[must_use]
+    pub fn transpose(&self) -> Self {
         Self::construct(|m| unsafe { sb::C_SkM44_transpose(self.native(), m) })
     }
 
@@ -731,6 +791,15 @@ impl M44 {
         V4::from_native_c(unsafe { sb::C_SkM44_map(self.native(), x, y, z, w) })
     }
 
+    /// When converting from [`M44`] to [`Matrix`], the third row and column is dropped. When
+    /// converting from [`Matrix`] to [`M44`] the third row and column remain as identity:
+    ///
+    /// ```text
+    /// [ a b c ]      [ a b 0 c ]
+    /// [ d e f ]  ->  [ d e 0 f ]
+    /// [ g h i ]      [ 0 0 1 0 ]
+    ///                [ g h 0 i ]
+    /// ```
     pub fn to_m33(&self) -> Matrix {
         let m = &self.mat;
         Matrix::new_all(m[0], m[4], m[12], m[1], m[5], m[13], m[3], m[7], m[15])
@@ -767,13 +836,9 @@ impl M44 {
         self
     }
 
-    // helper
-
-    #[allow(deprecated)]
-    pub fn to_matrix44(&self) -> Matrix44 {
-        let mut m = Matrix44::default();
-        m.set_col_major(&self.mat);
-        m
+    pub fn pre_scale_xyz(&mut self, x: scalar, y: scalar, z: scalar) -> &mut Self {
+        unsafe { self.native_mut().preScale1(x, y, z) };
+        self
     }
 }
 
@@ -781,7 +846,7 @@ impl Mul for &M44 {
     type Output = M44;
 
     fn mul(self, m: Self) -> Self::Output {
-        M44::concat(self, &m)
+        M44::concat(self, m)
     }
 }
 
@@ -833,18 +898,9 @@ impl From<Matrix> for M44 {
     }
 }
 
-#[allow(deprecated)]
-impl From<&Matrix44> for M44 {
-    fn from(m: &Matrix44) -> Self {
-        let mut rm: [f32; 16] = Default::default();
-        m.as_col_major(&mut rm);
-        M44::col_major(&rm)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{matrix, Matrix, Rect, M44};
+    use crate::{M44, Matrix, Rect, matrix};
 
     #[test]
     pub fn convert_from_matrix_and_back() {
@@ -852,6 +908,7 @@ mod tests {
         let vr = Rect::new(-4.5, -4.0, 4.5, 2.0);
         let dst = Rect::new(0.0, 0.0, 1350.0, 900.0);
 
+        #[allow(deprecated)]
         let m = Matrix::from_rect_to_rect(vr, dst, matrix::ScaleToFit::Center).unwrap();
         let m44 = M44::from(m);
         let m3 = m44.to_m33();

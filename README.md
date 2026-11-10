@@ -1,56 +1,81 @@
-# <img alt="" width="48" align="top" src="artwork/rust-skia-icon_512x512.png"/> Safe Rust bindings to the [Skia Graphics Library](https://skia.org/).
+# <img alt="" width="48" align="top" src="artwork/rust-skia-icon_512x512.png"/> Safe Rust bindings for the [Skia Graphics Library](https://skia.org/).
 
-[![crates.io](https://img.shields.io/crates/v/skia-safe)](https://crates.io/crates/skia-safe) [![license](https://img.shields.io/crates/l/skia-safe)](LICENSE) [![Windows QA](https://github.com/rust-skia/rust-skia/actions/workflows/windows-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/windows-qa.yaml) [![Linux QA](https://github.com/rust-skia/rust-skia/actions/workflows/linux-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/linux-qa.yaml) [![macOS QA](https://github.com/rust-skia/rust-skia/actions/workflows/macos-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/macos-qa.yaml)
+[![crates.io](https://img.shields.io/crates/v/skia-safe)](https://crates.io/crates/skia-safe) [![license](https://img.shields.io/crates/l/skia-safe)](LICENSE) [![docs.rs](https://docs.rs/skia-safe/badge.svg)](https://docs.rs/skia-safe) [![Windows QA](https://github.com/rust-skia/rust-skia/actions/workflows/windows-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/windows-qa.yaml) [![Linux QA](https://github.com/rust-skia/rust-skia/actions/workflows/linux-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/linux-qa.yaml) [![macOS QA](https://github.com/rust-skia/rust-skia/actions/workflows/macos-qa.yaml/badge.svg?branch=master)](https://github.com/rust-skia/rust-skia/actions/workflows/macos-qa.yaml)
 
-Skia Submodule Status: chrome/m91 ([upstream changes][skia-upstream], [our changes][skia-ours]).
+Skia Submodule Status: chrome/m157 ([upstream changes][skia-upstream], [our changes][skia-ours]).
 
-[skia-upstream]: https://github.com/rust-skia/skia/compare/m91-0.39.3...google:chrome/m91
-[skia-ours]: https://github.com/google/skia/compare/chrome/m91...rust-skia:m91-0.39.3
+[skia-upstream]: https://github.com/rust-skia/skia/compare/m157.3...google:chrome/m157
+[skia-ours]: https://github.com/google/skia/compare/chrome/m157...rust-skia:m157.3
 
-## Goals
+## About
 
-This project provides _up to date_ safe bindings that bridge idiomatic Rust with Skia's C++ API on desktop and mobile platforms, including GPU rendering backends for [Vulkan](https://en.wikipedia.org/wiki/Vulkan_(API)), [Metal](https://en.wikipedia.org/wiki/Metal_(API)), [OpenGL](https://en.wikipedia.org/wiki/OpenGL), and [Direct3D](https://en.wikipedia.org/wiki/Direct3D).
+This project provides _up to date_ safe bindings that bridge idiomatic Rust with Skia's C++ API on desktop and mobile platforms, including GPU rendering backends for [Vulkan](<https://en.wikipedia.org/wiki/Vulkan_(API)>), [Metal](<https://en.wikipedia.org/wiki/Metal_(API)>), [OpenGL](https://en.wikipedia.org/wiki/OpenGL), and [Direct3D](https://en.wikipedia.org/wiki/Direct3D). Skia can also render on the device of a [`wgpu`](https://wgpu.rs) application (experimental).
+
+## Contents
+
+- [Status](#status)
+  - [Documentation](#documentation)
+  - [Crate](#crate)
+  - [Platform Support, Build Targets, and Prebuilt Binaries](#platform-support-build-targets-and-prebuilt-binaries)
+  - [Wrappers & Codecs & Supported Features](#wrappers--codecs--supported-features)
+- [Building](#building)
+  - [On macOS](#on-macos)
+  - [On Windows](#on-windows)
+  - [On Linux](#on-linux)
+  - [For Android](#for-android)
+  - [For iOS](#for-ios)
+  - [For visionOS](#for-visionos)
+  - [For WebAssembly](#for-webassembly)
+  - [Skia](#skia)
+- [Example Applications](#example-applications)
+  - [wgpu-window](#wgpu-window)
+  - [gl-window](#gl-window)
+  - [vulkan-window](#vulkan-window)
+  - [metal-window](#metal-window)
+  - [metal-window-graphite](#metal-window-graphite)
+  - [d3d-window](#d3d-window)
+  - [icon](#icon)
+  - [skia-org](#skia-org)
+- [Example Images](#example-images)
+- [Contributing](#contributing)
+- [Notable Contributions](#notable-contributions)
+- [Maintainers](#maintainers)
+- [License](#license)
 
 ## Status
 
 ### Documentation
 
-Because we [can't build on docs.rs](https://docs.rs/crate/skia-safe/0.34.0/builds), the `cargo doc` output for skia-safe is manually created and uploaded to [rust-skia.github.io](https://rust-skia.github.io/doc/skia_safe).
-
-We (slowly) [add more documentation](https://github.com/rust-skia/rust-skia/issues/446) by converting Skia's Doxygen comments to Rust.
+The skia-safe API documentation is available on [docs.rs](https://docs.rs/skia-safe).
 
 ### Crate
 
-A prerelease crate is available from [crates.io](https://crates.io/crates/skia-safe) and adding
-
-```toml
-[dependencies]
-skia-safe = "0"
-```
-
-to your `Cargo.toml` should get you started.
-
-**On Linux** you may run into trouble when **OpenSSL libraries** are missing. On **Debian** and **Ubuntu** they can be installed with:
+A prerelease crate is available from [crates.io](https://crates.io/crates/skia-safe). To get started, run
 
 ```bash
-sudo apt-get install pkg-config libssl-dev
+cargo add skia-safe
 ```
 
-For other platforms, more information is available at the [OpenSSL crate documentation](https://docs.rs/openssl/0.10.24/openssl/#automatic).
+in your project's folder. And you might want to take a look at the [gl-window](https://github.com/rust-skia/rust-skia/tree/master/skia-safe/examples/gl-window) example if you plan to render to a window.
 
 ### Platform Support, Build Targets, and Prebuilt Binaries
 
-Because building Skia takes a lot of time and needs tools that may be missing, the skia-bindings crate's `build.rs` tries to download prebuilt binaries from [the skia-binaries repository](<https://github.com/rust-skia/skia-binaries/releases>).
+Because building Skia takes a lot of time and needs tools that may be missing, the skia-bindings crate's `build.rs` attempts to download prebuilt binaries from [the skia-binaries repository](https://github.com/rust-skia/skia-binaries/releases) using the `curl` command line tool.
 
-| Platform | Binaries |
-| -------- | -------- |
-|  Windows | `x86_64-pc-windows-msvc` |
-| Linux Ubuntu 16, 18<br />CentOS 7, 8 | `x86_64-unknown-linux-gnu` |
-| macOS    | `x86_64-apple-darwin` |
-| Android  | `aarch64-linux-android`<br/>`x86_64-linux-android` |
-| iOS      | `aarch64-apple-ios`<br/>`x86_64-apple-ios` |
+| Platform                                         | Binaries                                                                   |
+| ------------------------------------------------ | -------------------------------------------------------------------------- |
+| Windows                                          | `x86_64-pc-windows-msvc`<br/>`aarch64-pc-windows-msvc`                     |
+| Linux (glibc ≥ 2.31, libstdc++ ≥ GLIBCXX_3.4.28) | `x86_64-unknown-linux-gnu`<br/>`aarch64-unknown-linux-gnu`                 |
+| macOS                                            | `x86_64-apple-darwin`<br/>`aarch64-apple-darwin`                           |
+| Android                                          | `aarch64-linux-android`<br/>`x86_64-linux-android`                         |
+| iOS                                              | `aarch64-apple-ios`<br/>`aarch64-apple-ios-sim`<br/>`x86_64-apple-ios`     |
+| WebAssembly                                      | `wasm32-unknown-emscripten`                                                |
 
-There no support for WebAssembly yet. If you'd like to help out, take a look at issue [#39](https://github.com/rust-skia/rust-skia/issues/39).
+The glibc and libstdc++ requirements are those of the container the binaries are built in, so they
+are at least [Ubuntu 20.04](https://en.wikipedia.org/wiki/Ubuntu_version_history), Debian 11, Fedora 32,
+and CentOS Stream 9. The build script does not detect this on its own: on an older system the
+downloaded binaries fail to link. In that case, set `FORCE_SKIA_BUILD=1` (or disable the
+`binary-cache` feature) to build Skia from source instead.
 
 ### Wrappers & Codecs & Supported Features
 
@@ -58,19 +83,21 @@ The supported wrappers, Skia codecs, and additional Skia features are documented
 
 ## Building
 
-If the target platform or feature configuration is not available as a prebuilt binary, skia-bindings' `build.rs` will try to build Skia and generate the Rust bindings. 
+If the target platform or feature configuration is not available as a prebuilt binary, skia-bindings' `build.rs` will try to build Skia and generate the Rust bindings.
 
-To prepare for that, **LLVM** and **Python 2** are needed:
+For building Skia from source, **LLVM**, **Python 3**, and **Ninja** are required:
 
 **LLVM**
 
-We recommend the version that comes preinstalled with your platform, or, if not available, the [latest official LLVM release](http://releases.llvm.org/download.html). To see which version of LLVM/Clang is installed on your system, use `clang --version`. 
+We recommend the version that comes preinstalled with your platform, or, if not available, the [latest official LLVM release](http://releases.llvm.org/download.html). To see which version of LLVM/Clang is installed on your system, use `clang --version`.
 
-**Python 2**
+**Python 3**
 
-Python version 2.7 _must_ be available.
+The build script probes for `python --version` and `python3 --version` and uses the first one that looks like a version 3 executable for building Skia.
 
-The build script probes for `python --version` and `python2 --version` and uses the first one that looks like a version 2 executable for building Skia.
+**Ninja**
+
+The build system for Skia. `ninja` is available as a binary package on all major platforms. Install `ninja` or `ninja-build` and make sure it is in your `PATH` with `ninja --version`.
 
 ### On macOS
 
@@ -82,36 +109,28 @@ The build script probes for `python --version` and `python2 --version` and uses 
 
   or download and install the [Command Line Tools for Xcode](https://developer.apple.com/download/more/).
 
-- **macOS Mojave only**: install the SDK headers:
+- As an alternative to Apple's Xcode LLVM, install LLVM via `brew install llvm` and then set `PATH`, `CPPFLAGS`, and `LDFLAGS` as instructed.
 
-  ```bash
-  sudo open /Library/Developer/CommandLineTools/Packages/macOS_SDK_headers_for_macOS_10.14.pkg
-  ```
-
-  If not installed, the Skia build _may_ fail to build `SkJpegUtility.cpp` and the binding generation _will_ fail with  `'TargetConditionals.h' file not found` . Also note that the Command Line Tools _and_ SDK headers _should_ be reinstalled after an update of XCode.
-
-- As an alternative to Apple's XCode LLVM, install LLVM via `brew install llvm` or `brew install llvm` and then set `PATH`, `CPPFLAGS`, and `LDFLAGS` like instructed. 
-
-  If the environment variables are not set, [bindgen](https://github.com/rust-lang/rust-bindgen) will most likely use the wrong `libclang.dylib` and cause confusing compilation errors (see #228).
+  If the environment variables are not set, [bindgen](https://github.com/rust-lang/rust-bindgen) will most likely use the wrong `libclang.dylib` and cause confusing compilation errors (see [#228](https://github.com/rust-skia/rust-skia/issues/228)).
 
 ### On Windows
 
 - Have the latest versions of `git` and Rust ready.
 
-- [Install Visual Studio 2019 Build Tools](https://visualstudio.microsoft.com/downloads/) or one of the IDE releases. If you installed the IDE, make sure that the [Desktop Development with C++ workload](https://docs.microsoft.com/en-us/cpp/build/vscpp-step-0-installation?view=vs-2019) is installed.
+- [Install Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/) or one of the other IDE editions. If you installed the IDE, make sure that the [Desktop Development with C++ workload](https://docs.microsoft.com/en-us/cpp/build/vscpp-step-0-installation?view=msvc-170) is installed.
 
 - Install the [latest LLVM](http://releases.llvm.org/download.html) distribution.
 
   If the environment variable `LLVM_HOME` is not defined, the build script will look for LLVM installations located at `C:\Program Files\LLVM\`, `C:\LLVM\`, and `%USERPROFILE%\scoop\apps\llvm\current\`.
-  
+
 - [MSYS2](https://www.msys2.org/):
-  
-  - Install Python2 with `pacman -S python2`.
-  
+
+  - Install Python 3 with `pacman -S python`.
+
 - Windows Shell (`Cmd.exe`):
-  
-  - Download and install Python version 2 from [python.org](https://www.python.org/downloads/release/python-2716/).
-  
+
+  - Download and install Python 3 from [python.org](https://www.python.org/downloads).
+
 - Install and select the MSVC toolchain:
   ```bash
   rustup default stable-msvc
@@ -119,105 +138,214 @@ The build script probes for `python --version` and `python2 --version` and uses 
 
 ### On Linux
 
-#### Ubuntu 16+
+#### Ubuntu 20+
 
 - LLVM/Clang should be available already, if not, [install the latest version](http://releases.llvm.org/download.html).
-
 - If OpenGL libraries are missing, install the drivers for you graphics card, or a mesa package like `libgl1-mesa-dev`.
-
-#### CentOS 7
-
-- Install the following packages:
-
-  ```bash
-  sudo yum install gcc openssl-devel libX11-devel python2 fontconfig-devel mesa-libGL-devel
-  ```
-
-- [Install and enable the LLVM toolset 7](https://www.softwarecollections.org/en/scls/rhscl/llvm-toolset-7.0/)
-
-- [Install and enable the Developer Toolset 8](https://www.softwarecollections.org/en/scls/rhscl/devtoolset-8/)
-
-#### CentOS 8
-
-- Install the following packages:
-
-  ```bash
-  sudo yum install gcc openssl-devel libX11-devel python2 clang fontconfig-devel mesa-libGL-devel
-  ```
-
-- Set `/usr/bin/python2` as the default `python` command:
-
-  ```bash
-  sudo alternatives --set python /usr/bin/python2
-  ```
+- For **X11**, build with feature `x11`.
+- For **Wayland**, install `libwayland-dev` and build with the `wayland` feature.
 
 ### For Android
 
 Cross compilation to Android is supported for targeting 64 bit ARM and Intel x86 architectures (`aarch64` and `x86_64`) for API Level 26 (Oreo, Android 8):
 
+We recommend using [cargo apk](https://crates.io/crates/cargo-apk), but if that does not work for you, following are some instructions on how we build Android targets with GitHub Actions:
+
 For example, to compile for `aarch64`:
 
-1. Install the rust target:
+1. Install the Rust target:
    ```bash
    rustup target install aarch64-linux-android
    ```
-2. Download the [r21e NDK](https://developer.android.com/ndk/downloads) for your host architecture and unzip it.
-3. Compile your package for the `aarch64-linux-android` target:
+2. Download the [r26d NDK](https://developer.android.com/ndk/downloads) (or newer) for your host architecture and unzip it.
+3. Compile your project for the `aarch64-linux-android` target:
 
 On **macOS**:
 
 ```bash
-export ANDROID_NDK=:path-to-android-ndk-r21e
+export ANDROID_NDK=:path-to-android-ndk-r26d
 export PATH=$PATH:$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin
 export CC_aarch64_linux_android=aarch64-linux-android26-clang
 export CXX_aarch64_linux_android=aarch64-linux-android26-clang++
+export AR_aarch64_linux_android=llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android26-clang
 
 cargo build -vv --target aarch64-linux-android
 ```
 
-Note: we don't support Apple's Clang 11 to build for Android on macOS, so you need to install LLVM and set the `PATH` like instructed.
+We don't support Apple's Clang to build for Android on macOS, so you need to install LLVM and set the `PATH` like instructed.
 
 On **Linux**:
 
 ```bash
-export ANDROID_NDK=:path-to-android-ndk-r21e
+export ANDROID_NDK=:path-to-android-ndk-r26d
 export PATH=$PATH:$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 export CC_aarch64_linux_android=aarch64-linux-android26-clang
 export CXX_aarch64_linux_android=aarch64-linux-android26-clang++
+export AR_aarch64_linux_android=llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android26-clang
 
 cargo build -vv --target aarch64-linux-android
 ```
 
-On **Windows** the Android NDK clang executable must be invoked through `.cmd` scripts:
+On **Windows** the Android NDK Clang executable must be invoked through `.cmd` scripts:
 
 ```bash
-export ANDROID_NDK=:path-to-android-ndk-r21e
+export ANDROID_NDK=:path-to-android-ndk-r26d
 export PATH=$PATH:$ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/bin
 export CC_aarch64_linux_android=aarch64-linux-android26-clang.cmd
 export CXX_aarch64_linux_android=aarch64-linux-android26-clang++.cmd
+export AR_aarch64_linux_android=llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android26-clang.cmd
 
 cargo build -vv --target aarch64-linux-android
 ```
+
 _Notes:_
 
+- At the time of this writing, the Rust compiler will [automatically add a `-lgcc` argument](https://github.com/rust-windowing/android-ndk-rs/issues/149) to the linker, which results in a linker error, because newer NDKs do not contain `libgcc.a` anymore. To fix this, we created a workaround and [copy `libunwind.a` over to `libgcc.a`](https://github.com/pragmatrix/rust-skia-containers/blob/master/linux/Dockerfile#L48-L52). Cargo apk does something [similar](https://github.com/rust-windowing/android-ndk-rs/issues/149#issuecomment-963988601).
 - The `CARGO_TARGET_${TARGET}_LINKER` environment variable name [needs to be all uppercase](https://github.com/rust-lang/cargo/issues/1109#issuecomment-386850387).
 - In some older shells (for example macOS High Sierra), environment variable replacement can not be used when the variable was defined on the same line. Therefore the `ANDROID_NDK` variable must be defined before it's used in the `PATH` variable.
 - Rebuilding skia-bindings with a different target may cause linker errors, in that case `touch skia-bindings/build.rs` will force a rebuild ([#10](https://github.com/rust-skia/rust-skia/issues/10)).
 
 ### For iOS
 
-Compilation to iOS is supported on macOS targeting the iOS simulator (`--target x86_64-apple-ios`) and 64 bit ARM devices (`--target aarch64-apple-ios`). The ARM64**e** architecture is [not supported yet](https://github.com/rust-lang/rust/issues/73628).
+Compilation to iOS is supported on macOS targeting the iOS simulator (`--target x86_64-apple-ios` and `--target aarch64-apple-ios-sim`) and 64 bit ARM devices (`--target aarch64-apple-ios`). The ARM64**e** architecture is [not supported yet](https://github.com/rust-lang/rust/issues/73628).
+
+### For visionOS
+
+Compilation to visionOS is supported on macOS targeting visionOS devices (`--target aarch64-apple-visionos`) and the visionOS simulator (`--target aarch64-apple-visionos-sim`). These are Rust [tier 3 targets](https://doc.rust-lang.org/rustc/platform-support.html), so a nightly toolchain and `-Z build-std` are required, and the visionOS SDK must be installed via Xcode. Skia itself has no dedicated visionOS configuration, so it is built using its iOS code paths against the visionOS (`xros`) SDK. Prebuilt binaries are not provided; Skia is built from source. Only Metal is available as a GPU backend (visionOS has no OpenGL).
+
+### For WebAssembly
+
+Install `emscripten` version 5.0 or newer — the emsdk ships its own clang 23 (5.x) / clang 24 (6.x) to compile the wasm code. It does **not** ship a `libclang` library, which the binding generator additionally needs on the host (see [Building — On macOS] and [Building — On Linux]). (emsdk 4.x is not supported: its [WebGL sync function signatures](https://github.com/emscripten-core/emscripten/pull/25933) changed during the 4.x series, while Skia's version gate still assumes the 5.x layout.) The recommended way to install Emscripten is the [emsdk](https://emscripten.org/docs/getting_started/downloads.html) tool:
+
+```bash
+git clone https://github.com/emscripten-core/emsdk.git
+cd emsdk
+./emsdk install latest-stable
+./emsdk activate latest-stable
+source ./emsdk_env.sh
+```
+
+Build with the `wasm32-unknown-emscripten` target (`wasm32-unknown-unknown` is
+unsupported because it is [fundamentally incompatible with linking C code](https://github.com/rustwasm/team/issues/291#issuecomment-645482430):
+
+```bash
+export EMSDK=<path-to-emsdk>
+export EMCC_CFLAGS="-s ERROR_ON_UNDEFINED_SYMBOLS=0"
+
+cargo build --target wasm32-unknown-emscripten
+```
+
+The `EMSDK` environment variable must be set to the root of your `emscripten` SDK. It can point to
+the emsdk install root (its `upstream/emscripten` directory is detected), directly to an activated
+`emscripten` installation, or to the unpacked toolchain of a bare
+[emscripten release archive](https://storage.googleapis.com/webassembly/emscripten-releases-builds/).
+The build script detects the layout automatically.
+
+In `EMCC_CFLAGS`, `-s ERROR_ON_UNDEFINED_SYMBOLS` is a
+[workaround](https://github.com/rust-lang/rust/issues/85821#issuecomment-969369677) to build with
+`emscripten > 2.0.9`.
+
+If you want to enable WebGL, you will also have to set `MAX_WEBGL_VERSION=2`:
+
+```bash
+export EMSDK=<path-to-emsdk>
+export EMCC_CFLAGS="-s ERROR_ON_UNDEFINED_SYMBOLS=0 -s MAX_WEBGL_VERSION=2"
+
+cargo build --target wasm32-unknown-emscripten --features gl
+```
+
+On macOS there is a problem with the OS version of `ar` so you will have to install the GNU version from homebrew:
+
+```bash
+brew install binutils
+```
+
+Then prepend the `binutils` path to `PATH`. The path depends on your CPU
+architecture, and can be retrieved with `brew info binutils`. Here is an
+example for Apple silicon:
+
+```bash
+export EMSDK=<path-to-emsdk>
+export EMCC_CFLAGS="-s ERROR_ON_UNDEFINED_SYMBOLS=0"
+export PATH="/opt/homebrew/opt/binutils/bin:$PATH"
+
+cargo build --target wasm32-unknown-emscripten
+```
 
 ### Skia
 
-For situations in which Skia does not build or needs to be configured differently, we support some customization support in `skia-bindings/build.rs`. For more details take a look at the [README of the skia-bindings package](skia-bindings/README.md).
+`cargo build` is sufficient to build the bindings _including_ Skia. For situations in which Skia does not build or needs to be configured differently, some customization is supported in `skia-bindings/build.rs`. For more details take a look at the [README of the skia-bindings package](skia-bindings/README.md).
 
-Please share your build experience so that we can try to automate the build and get to the point where `cargo build` _is_ sufficient to build the bindings _including_ Skia, and if that is not possible, clearly prompts to what's missing.
+Please share your build experience so that we can try to automate the build further.
 
 ## Example Applications
+
+### wgpu-window
+
+[![wgpu-window](artwork/wgpu-window.png)](skia-safe/examples/wgpu-window)
+
+A `wgpu` application that renders a rotating cube. Skia draws the animated rust-skia icon into the cube's texture every frame, on the application's own `wgpu` device and queue.
+
+```bash
+cargo run --example wgpu-window --features wgpu
+```
+
+### gl-window
+
+An example that opens an OpenGL Window and draws the rust-skia icon with skia-safe (contributed by [@nornagon](https://github.com/nornagon)).
+
+```bash
+cargo run --example gl-window --features gl
+```
+
+On Linux the feature `x11` needs to be enabled:
+
+```bash
+cargo run --example gl-window --features gl,x11
+```
+
+### vulkan-window
+
+An example application that opens a Window and renders a blue rectangle using [Vulkano](https://github.com/vulkano-rs/vulkano) (contributed by [@samizdatco](https://github.com/samizdatco) in [#1066](https://github.com/rust-skia/rust-skia/pull/1066))
+
+```bash
+cargo run --example vulkan-window --features "ganesh,vulkan"
+```
+
+To enable Vulkan validation layer messages and debug output in this example:
+
+```bash
+cargo run --example vulkan-window --features "ganesh,vulkan" -- --validate
+```
+
+To add Vulkan support to your system, the easiest way is to install the [LunarG SDK](https://vulkan.lunarg.com/sdk/home), and enable "System Global Installation" in the installer.
+
+### metal-window
+
+An example application that opens a Metal Window and renders a blue rectangle using Skia's Ganesh backend. It is only supported on macOS.
+
+```bash
+cargo run --example metal-window --features "ganesh,metal"
+```
+
+### metal-window-graphite
+
+The same window example, but rendering with Skia's Graphite backend instead of Ganesh. It is only supported on macOS.
+
+```bash
+cargo run --example metal-window-graphite --features "graphite,metal"
+```
+
+### d3d-window
+
+An example application that opens a Window and renders a rectangle using Direct3D 12 and Skia's Ganesh backend (most of the code is adapted from the [windows-rs Direct3D 12 sample](https://github.com/microsoft/windows-rs/tree/master/crates/samples/windows/direct3d12)). It is only supported on Windows. Use the arrow keys to move the rectangle and `Escape` to quit.
+
+```bash
+cargo run --example d3d-window --features d3d
+```
 
 ### icon
 
@@ -244,26 +372,13 @@ cargo run -- [OUTPUT_DIR]
 to generate some Skia drawn PNG images in the directory `OUTPUT_DIR`. To render with OpenGL, use
 
 ```bash
-cargo run -- [OUTPUT_DIR] --driver opengl
+cargo run --features gl -- [OUTPUT_DIR] --driver gl
 ```
 
 And to show the drivers that are supported
-```bash 
+
+```bash
 cargo run -- --help
-```
-
-### gl-window
-
-An example that opens an OpenGL Window and draws the rust-skia icon with skia-safe (contributed by [@nornagon](https://github.com/nornagon)).
-
-```bash
-cargo run --example gl-window --features gl
-```
-
-On Linux the feature `x11` needs to be enabled:
-
-```bash
-cargo run --example gl-window --features gl,x11
 ```
 
 ## Example Images
@@ -285,16 +400,21 @@ Dash Path Effect:
 
 For more, you may take a look at the [rust-skia.github.io](https://github.com/rust-skia/rust-skia.github.io/tree/master/skia-org/cpu) repository.
 
-## This project needs contributions!
+## Contributing
 
-If you'd like to help with the bindings, take a look at the [Wiki](https://github.com/rust-skia/rust-skia/wiki) to get started and create an issue to prevent duplicate work. For smaller tasks, grep for "TODO"s in the source code. And for heroic work, check out the label [help wanted](https://github.com/rust-skia/rust-skia/labels/help%20wanted). And if you like to help making the Rust API nicer to use, look out for open issues with the label [api ergonomics](https://github.com/rust-skia/rust-skia/issues?q=is%3Aissue+is%3Aopen+label%3A%22api+ergonomics%22).
+If you'd like to help with the bindings, take a look at the [Wiki](https://github.com/rust-skia/rust-skia/wiki) to get started and create an issue to prevent duplicate work. For smaller tasks, grep for "TODO"s in the source code. And for heroic work, check out the label [help wanted](https://github.com/rust-skia/rust-skia/labels/help%20wanted). And if you'd like to help make the Rust API nicer to use, look out for open issues with the label [api ergonomics](https://github.com/rust-skia/rust-skia/issues?q=is%3Aissue+is%3Aopen+label%3A%22api+ergonomics%22).
 
 More details can be found at [CONTRIBUTING.md](https://github.com/rust-skia/rust-skia/tree/master/CONTRIBUTING.md).
 
 ## Notable Contributions
 
-- Denis Kolodin ([@DenisKolodin](https://github.com/DenisKolodin)) added build support for Android.
+- Denis Kolodin ([@DenisKolodin](https://github.com/DenisKolodin)) contributed build support for Android.
 - Alberto González Palomo ([@AlbertoGP](https://github.com/AlbertoGP)) designed the Rust-Skia Logo and the example program that renders it.
+- Luper Rouch ([@flupke](https://github.com/flupke), sponsored by [Jitter](https://jitter.video/))
+  added build support for the `wasm32-unknown-emscripten` target.
+- Osei Fortune ([@triniwiz](https://github.com/triniwiz)) and Savchenko Ivan ([@Aiving](https://github.com/Aiving))
+  contributed rendering SVG files.
+- Maxime Vincent ([@maximevince](https://github.com/maximevince)) contributed the Skottie/Lottie support and examples.
 
 ## Maintainers
 
@@ -304,5 +424,3 @@ More details can be found at [CONTRIBUTING.md](https://github.com/rust-skia/rust
 ## License
 
 MIT
-
-  

@@ -1,14 +1,13 @@
-//! This file contains implementations for types that are
-//! re-exported in skia-safe.
+//! This file contains implementations for types that are re-exported in skia-safe.
 //!
 //! We could provide trait implementations in skia-safe, but then users of the library would have to
 //! import the implementation type _and_ the trait.
 //!
-//! See also: https://github.com/rust-lang/rfcs/issues/1880
+//! See also: <https://github.com/rust-lang/rfcs/issues/1880>
 
 use crate::{
-    SkAlphaType, SkBlendMode, SkBlendModeCoeff, SkImage_CompressionType,
-    SkImage_kCompressionTypeCount, SkPathFillType, SkPathVerb, SkPath_Verb,
+    SkAlphaType, SkBlendMode, SkBlendModeCoeff, SkPath_Verb, SkPathFillType, SkPathVerb,
+    SkYUVColorSpace,
 };
 use std::ffi::CStr;
 
@@ -84,12 +83,22 @@ impl SkPathFillType {
         (self as i32 & 2) != 0
     }
 
+    #[must_use]
     pub fn to_non_inverse(self) -> Self {
         match self {
-            SkPathFillType::Winding => self,
-            SkPathFillType::EvenOdd => self,
-            SkPathFillType::InverseWinding => SkPathFillType::Winding,
-            SkPathFillType::InverseEvenOdd => SkPathFillType::EvenOdd,
+            Self::Winding => self,
+            Self::EvenOdd => self,
+            Self::InverseWinding => Self::Winding,
+            Self::InverseEvenOdd => Self::EvenOdd,
+        }
+    }
+
+    pub fn toggle_inverse(self) -> Self {
+        match self {
+            Self::Winding => Self::InverseWinding,
+            Self::EvenOdd => Self::InverseEvenOdd,
+            Self::InverseWinding => Self::Winding,
+            Self::InverseEvenOdd => Self::EvenOdd,
         }
     }
 }
@@ -100,10 +109,10 @@ impl SkAlphaType {
     }
 }
 
-impl SkImage_CompressionType {
-    pub const COUNT: usize = SkImage_kCompressionTypeCount as _;
-    #[deprecated(since = "0.27.0", note = "same as ETC2_RGB8_UNORM")]
-    pub const ETC1: Self = SkImage_CompressionType::ETC2_RGB8_UNORM;
+impl SkYUVColorSpace {
+    pub fn is_limited_range(self) -> bool {
+        unsafe { crate::SkYUVColorSpaceIsLimitedRange(self) }
+    }
 }
 
 #[cfg(feature = "gl")]
@@ -118,6 +127,17 @@ impl From<crate::GrGLFormat> for crate::GrGLenum {
     fn from(format: crate::GrGLFormat) -> Self {
         unsafe { crate::C_GrGLFormatToEnum(format) }
     }
+}
+
+#[cfg(feature = "vulkan")]
+mod vulkan {
+    impl PartialEq for crate::VkComponentMapping {
+        fn eq(&self, other: &Self) -> bool {
+            self.r == other.r && self.g == other.g && self.b == other.b && self.a == other.a
+        }
+    }
+
+    impl Eq for crate::VkComponentMapping {}
 }
 
 #[cfg(feature = "d3d")]

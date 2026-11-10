@@ -13,40 +13,48 @@
 #include "modules/skparagraph/include/TextStyle.h"
 #include "modules/skparagraph/include/TypefaceFontProvider.h"
 
+#include "modules/skunicode/include/SkUnicode_icu.h"
+
 // m84: needs definition of SkFontData
 #include "src/core/SkFontDescriptor.h"
+
+#include <optional>
 
 using namespace skia::textlayout;
 
 //
-// FontCollection.h
+// FontArguments.h
 //
 
-struct Typefaces {
-    std::vector<sk_sp<SkTypeface>> typefaces;
-};
-
 extern "C" {
-    void C_Typefaces_construct(Typefaces* uninitialized) {
-        new(uninitialized)Typefaces();
+    void C_FontArguments_Construct(const SkFontArguments* fontArguments, FontArguments* uninitialized) {
+        new (uninitialized) FontArguments(*fontArguments);
     }
-    
-    void C_Typefaces_destruct(Typefaces* self) {
-        self->~Typefaces();
+
+    void C_FontArguments_CopyConstruct(FontArguments* uninitialized, const FontArguments* self) {
+        new (uninitialized) FontArguments(*self);
     }
-    
-    size_t C_Typefaces_count(const Typefaces* faces) {
-        return faces->typefaces.size();
+
+    void C_FontArguments_destruct(FontArguments* self) {
+        self->~FontArguments();
     }
-    
-    SkTypeface* C_Typefaces_get(const Typefaces* faces, size_t i) {
-        return faces->typefaces[i].get();
+
+    bool C_FontArguments_Equals(const FontArguments* lhs, const FontArguments* rhs) {
+        return *lhs == *rhs;
     }
-    
-    SkTypeface* C_Typefaces_release(Typefaces* faces, size_t i) {
-        return faces->typefaces[i].release();
+
+    size_t C_FontArguments_hash(const FontArguments* self) {
+        return std::hash<FontArguments>{}(*self);
+    }
+
+    SkTypeface* C_FontArguments_cloneTypeface(const FontArguments* self, SkTypeface* tf) {
+        return self->CloneTypeface(sp(tf)).release();
     }
 }
+
+//
+// FontCollection.h
+//
 
 extern "C" {
     FontCollection* C_FontCollection_new() {
@@ -81,17 +89,29 @@ extern "C" {
         return self->getFallbackManager().release();
     }
 
-    void C_FontCollection_findTypefaces(FontCollection* self, const SkStrings* familyNames, SkFontStyle fontStyle, Typefaces* typefaces) {
-        auto tfs = self->findTypefaces(familyNames->strings, fontStyle);
-        typefaces->typefaces = std::move(tfs);
+    void C_FontCollection_findTypefaces(
+        FontCollection* self, 
+        const SkStrings* familyNames, 
+        SkFontStyle fontStyle,
+        const FontArguments* fontArguments,
+        VecSink<sk_sp<SkTypeface>>* typefaces) {
+        // TODO: Don't create a copy of `fontArguments`.
+        auto fa = opt(fontArguments);
+        auto tfs = self->findTypefaces(familyNames->strings, fontStyle, fa);
+        typefaces->set(tfs);
     }
 
-    SkTypeface* C_FontCollection_defaultFallback(FontCollection* self, SkUnichar unicode, SkFontStyle fontStyle, const SkString* locale) {
-        return self->defaultFallback(unicode, fontStyle, *locale).release();
+    SkTypeface* C_FontCollection_defaultFallback(FontCollection* self, SkUnichar unicode, const SkStrings* familyNames, SkFontStyle fontStyle, const SkString* locale, const FontArguments* arguments) {
+        return self->defaultFallback(unicode, familyNames->strings, fontStyle, *locale, opt(arguments)).release();
     }
+
 
     SkTypeface* C_FontCollection_defaultFallback2(FontCollection* self) {
         return self->defaultFallback().release();
+    }
+
+    SkTypeface* C_FontCollection_defaultEmojiFallback(FontCollection* self, SkUnichar emojiStart, SkFontStyle fontStyle, const SkString* locale) {
+        return self->defaultEmojiFallback(emojiStart, fontStyle, *locale).release();
     }
 
     bool C_FontCollection_fontFallbackEnabled(const FontCollection* self) {
@@ -112,6 +132,10 @@ extern "C" {
         self->~ParagraphCache();
     }
 
+    void C_ParagraphCache_turnOn(ParagraphCache* self, bool value) {
+        self->turnOn(value);
+    }
+
     int C_ParagraphCache_count(ParagraphCache* self) {
         return self->count();
     }
@@ -129,7 +153,7 @@ extern "C" {
     void C_StrutStyle_CopyConstruct(StrutStyle* uninitialized, const StrutStyle* other) {
         new(uninitialized) StrutStyle(*other);
     }
-    
+
     void C_StrutStyle_destruct(StrutStyle* self) {
         self->~StrutStyle();
     }
@@ -144,17 +168,17 @@ extern "C" {
         self->setFontFamilies(std::vector<SkString>(data, data + count));
     }
 
-    bool C_StrutStyle_equals(const StrutStyle* self, const StrutStyle* rhs) {
+    bool C_StrutStyle_Equals(const StrutStyle* self, const StrutStyle* rhs) {
         return *self == *rhs;
     }
 }
 
 extern "C" {
-    ParagraphStyle* C_ParagraphStyle_New() {
+    ParagraphStyle* C_ParagraphStyle_new() {
         return new ParagraphStyle();
     }
 
-    ParagraphStyle* C_ParagraphStyle_NewCopy(const ParagraphStyle* other) {
+    ParagraphStyle* C_ParagraphStyle_newCopy(const ParagraphStyle* other) {
         return new ParagraphStyle(*other);
     }
 
@@ -186,27 +210,21 @@ extern "C" {
 //
 
 extern "C" {
-    void C_LineMetrics_destruct(LineMetrics* self) {
-        self->~LineMetrics();
+    size_t C_LineMetrics_styleMetricsCount(const LineMetrics* self) {
+        return self->fLineMetrics.size();
     }
-    
-    size_t C_LineMetrics_fLineMetrics_count(const LineMetrics* self, size_t begin, size_t end) {
-        auto lower = self->fLineMetrics.lower_bound(begin);
-        auto upper = self->fLineMetrics.upper_bound(end);
-        return std::distance(lower, upper);
-    }
-    
-    struct StyleMetricsRecord {
+
+    struct IndexedStyleMetrics {
         size_t index;
-        const StyleMetrics* metrics;
+        StyleMetrics metrics;
     };
-    
-    void C_LineMetrics_fLineMetrics_getRange(const LineMetrics* self, size_t begin, size_t end, StyleMetricsRecord* array) {
-        auto lower = self->fLineMetrics.lower_bound(begin);
-        auto upper = self->fLineMetrics.upper_bound(end);
-        for (auto it = lower; it != upper; it++)
-        {
-            *array++ = StyleMetricsRecord { it->first, &it->second };
+
+    void C_LineMetrics_getAllStyleMetrics(const LineMetrics* self, IndexedStyleMetrics* result) {
+        auto begin = self->fLineMetrics.begin();
+        auto end = self->fLineMetrics.end();
+
+        for (auto it = begin; it != end; ++it) {
+            *result++ = IndexedStyleMetrics { it->first, it->second };
         }
     }
 }
@@ -214,37 +232,6 @@ extern "C" {
 //
 // Paragraph.h
 //
-
-struct TextBoxes {
-    std::vector<TextBox> textBoxes;
-};
-
-extern "C" {
-    void C_TextBoxes_destruct(TextBoxes* self) {
-        self->~TextBoxes();
-    }
-
-    const TextBox* C_TextBoxes_ptr_count(const TextBoxes* boxes, size_t* count) {
-        *count = boxes->textBoxes.size();
-        return &boxes->textBoxes.front();
-    }
-}
-
-struct LineMetricsVector {
-    std::vector<LineMetrics> lineMetrics;
-};
-
-extern "C" {
-    void C_LineMetricsVector_destruct(LineMetricsVector* self) {
-        self->~LineMetricsVector();
-    }
-
-    const LineMetrics* C_LineMetricsVector_ptr_count(const LineMetricsVector* metrics, size_t* count) {
-        *count = metrics->lineMetrics.size();
-        return &metrics->lineMetrics.front();
-    }
-}
-
 
 extern "C" {
     void C_Paragraph_delete(Paragraph* self) {
@@ -260,14 +247,14 @@ extern "C" {
     }
 
     void C_Paragraph_getRectsForRange(Paragraph *self, unsigned start, unsigned end, RectHeightStyle rectHeightStyle,
-                                            RectWidthStyle rectWidthStyle, TextBoxes* uninitialized) {
+                                            RectWidthStyle rectWidthStyle, VecSink<TextBox>* textBoxes) {
         auto v = self->getRectsForRange(start, end, rectHeightStyle, rectWidthStyle);
-        new(uninitialized) TextBoxes{std::move(v)};
+        textBoxes->set(v);
     }
 
-    void C_Paragraph_getRectsForPlaceholders(Paragraph* self, TextBoxes* uninitialized) {
+    void C_Paragraph_getRectsForPlaceholders(Paragraph* self, VecSink<TextBox>* result) {
         auto v = self->getRectsForPlaceholders();
-        new(uninitialized) TextBoxes{std::move(v)};
+        result->set(v);
     }
 
     void C_Paragraph_getGlyphPositionAtCoordinate(Paragraph* self, SkScalar x, SkScalar y, PositionWithAffinity* position) {
@@ -280,17 +267,128 @@ extern "C" {
         range[1] = sk_range.end;
     }
 
-    void C_Paragraph_getLineMetrics(Paragraph* self, LineMetricsVector* uninitialized) {
-        auto v = new(uninitialized) LineMetricsVector();
-        self->getLineMetrics(v->lineMetrics);
+    void C_Paragraph_getLineMetrics(Paragraph* self, VecSink<LineMetrics>* result) {
+        std::vector<LineMetrics> vec;
+        self->getLineMetrics(vec);
+        result->set(vec);
     }
-    
+
     size_t C_Paragraph_lineNumber(Paragraph* self) {
         return self->lineNumber();
     }
 
     void C_Paragraph_markDirty(Paragraph* self) {
         self->markDirty();
+    }
+
+    int32_t C_Paragraph_unresolvedGlyphs(Paragraph* self) {
+        return self->unresolvedGlyphs();
+    }
+
+    void C_Paragraph_unresolvedCodepoints(Paragraph* self, VecSink<SkUnichar>* result) {
+        auto set = self->unresolvedCodepoints();
+        std::vector<SkUnichar> vec(set.begin(), set.end());
+        result->set(vec);
+    }
+
+    void C_Paragraph_visit(Paragraph* self, void* ctx, void (*visit)(void *, size_t, const Paragraph::VisitorInfo *)) {
+        auto visitFn = [ctx,visit](int i, const Paragraph::VisitorInfo *info_)
+        {
+            visit(ctx, i, info_);
+        };
+        self->visit(visitFn);
+    }
+
+    void C_Paragraph_extendedVisit(Paragraph* self, void* ctx, void (*visit)(void *, size_t, const Paragraph::ExtendedVisitorInfo *)) {
+        auto visitFn = [ctx,visit](int i, const Paragraph::ExtendedVisitorInfo *info_)
+        {
+            visit(ctx, i, info_);
+        };
+        self->extendedVisit(visitFn);
+    }
+
+    int C_Paragraph_getPath(Paragraph* self, int lineNumber, SkPath* path) {
+        return self->getPath(lineNumber, path);
+    }
+
+    void C_Paragraph_GetPath(SkTextBlob* textBlob, SkPath* uninitialized) {
+        new (uninitialized) SkPath(Paragraph::GetPath(textBlob));
+    }
+
+    bool C_Paragraph_containsEmoji(Paragraph* self, SkTextBlob* textBlob) {
+        return self->containsEmoji(textBlob);
+    }
+
+    bool C_Paragraph_containsColorFontOrBitmap(Paragraph* self, SkTextBlob* textBlob) {
+        return self->containsColorFontOrBitmap(textBlob);
+    }
+
+    int C_Paragraph_getLineNumberAt(const Paragraph* self, TextIndex codeUnitIndex) {
+        return self->getLineNumberAt(codeUnitIndex);
+    }
+
+    int C_Paragraph_getLineNumberAtUTF16Offset(Paragraph* self, size_t codeUnitIndex) {
+        return self->getLineNumberAtUTF16Offset(codeUnitIndex);
+    }
+
+    void C_Paragraph_getLineMetricsAt(const Paragraph* self, size_t lineNumber, Sink<LineMetrics>* lineMetrics) {
+        LineMetrics lm;
+        if (self->getLineMetricsAt(lineNumber, &lm)) {
+            lineMetrics->set(lm);
+        }
+    }
+
+    void C_Paragraph_getActualTextRange(const Paragraph* self, size_t lineNumber, bool includeSpaces, size_t r[2]) {
+        auto range = self->getActualTextRange(lineNumber, includeSpaces);
+        r[0] = range.start;
+        r[1] = range.end;
+    }
+
+    void C_Paragraph_getGlyphClusterAt(const Paragraph* self, TextIndex codeUnitIndex, Sink<Paragraph::GlyphClusterInfo>* r) {
+        Paragraph::GlyphClusterInfo gci;
+        // Most likely const, implementation does not seem to mutate Paragraph.
+        if (const_cast<Paragraph*>(self)->getGlyphClusterAt(codeUnitIndex, &gci)) {
+            r->set(gci);
+        }
+    }
+
+    void C_Paragraph_getClosestGlyphClusterAt(const Paragraph* self, SkScalar dx, SkScalar dy, Sink<Paragraph::GlyphClusterInfo>* r) {
+        Paragraph::GlyphClusterInfo gci;
+        // Most likely const, implementation does not seem to mutate Paragraph.
+        if (const_cast<Paragraph*>(self)->getClosestGlyphClusterAt(dx, dy, &gci)) {
+            r->set(gci);
+        }
+    }
+
+    bool C_Paragraph_getGlyphInfoAtUTF16Offset(Paragraph* self, size_t codeUnitIndex, Paragraph::GlyphInfo* uninitialized) {
+        Paragraph::GlyphInfo gi;
+        if (self->getGlyphInfoAtUTF16Offset(codeUnitIndex, &gi)) {
+            new (uninitialized) Paragraph::GlyphInfo(gi);
+            return true;
+        }
+        return false;
+    }
+
+    bool C_Paragraph_getClosestUTF16GlyphInfoAt(Paragraph* self, SkScalar dx, SkScalar dy, Paragraph::GlyphInfo* uninitialized) {
+        Paragraph::GlyphInfo gi;
+        if (self->getClosestUTF16GlyphInfoAt(dx, dy, &gi)) {
+            new (uninitialized) Paragraph::GlyphInfo(gi);
+            return true;
+        }
+        return false;
+    }
+
+    void C_Paragraph_getFontAt(const Paragraph* self, TextIndex codeUnitIndex, SkFont* uninitialized) {
+        new (uninitialized) SkFont(self->getFontAt(codeUnitIndex));
+    }
+
+    void C_Paragraph_getFontAtUTF16Offset(Paragraph* self, size_t codeUnitIndex, SkFont* uninitialized) {
+        new (uninitialized) SkFont(self->getFontAtUTF16Offset(codeUnitIndex));
+    }
+
+    void C_Paragraph_getFonts(const Paragraph* self, VecSink<Paragraph::FontInfo>* r) {
+        auto fonts = self->getFonts();
+        r->set(fonts);
     }
 }
 
@@ -323,16 +421,31 @@ extern "C" {
         self->addPlaceholder(*placeholderStyle);
     }
 
-    void C_ParagraphBuilder_setParagraphStyle(ParagraphBuilder* self, const ParagraphStyle* style) {
-        self->setParagraphStyle(*style);
-    }
-
     Paragraph* C_ParagraphBuilder_Build(ParagraphBuilder* self) {
         return self->Build().release();
     }
 
+    void C_ParagraphBuilder_getText(ParagraphBuilder* self, char** text, size_t* len) {
+        auto span = self->getText();
+        *text = span.data();
+        *len = span.size();
+    }
+
+    ParagraphStyle* C_ParagraphBuilder_getParagraphStyle(const ParagraphBuilder* self) {
+        return new ParagraphStyle(self->getParagraphStyle());
+    }
+
+    void C_ParagraphBuilder_Reset(ParagraphBuilder* self) {
+        return self->Reset();
+    }
+
     ParagraphBuilder* C_ParagraphBuilder_make(const ParagraphStyle* style, const FontCollection* fontCollection) {
-        return ParagraphBuilder::make(*style, spFromConst(fontCollection)).release();
+        auto unicode = SkUnicodes::ICU::Make();
+        if (!unicode) {
+            return nullptr;
+        }
+
+        return ParagraphBuilder::make(*style, spFromConst(fontCollection), unicode).release();
     }
 }
 
@@ -359,8 +472,35 @@ extern "C" {
         new(uninitialized) TextStyle(*other);
     }
 
+    void C_TextStyle_cloneForPlaceholder(const TextStyle* self, TextStyle* uninitialized) {
+        // m102: We assume that they just forgot to mark `TextStyle::cloneForPlaceholder` as const.
+        new (uninitialized) TextStyle(const_cast<TextStyle*>(self)->cloneForPlaceholder());
+    }
+
     void C_TextStyle_destruct(TextStyle* self) {
         self->~TextStyle();
+    }
+
+    void C_TextStyle_getForeground(const TextStyle* self, SkPaint* uninitialized) {
+        new (uninitialized) SkPaint(self->getForeground());
+    }
+
+    void C_TextStyle_setForegroundPaint(TextStyle* self, const SkPaint* paint) {
+        self->setForegroundPaint(*paint);
+    }
+
+    void C_TextStyle_getBackground(const TextStyle* self, SkPaint* uninitialized) {
+        new (uninitialized) SkPaint(self->getBackground());
+    }
+
+    void C_TextStyle_setBackgroundPaint(TextStyle* self, const SkPaint* paint) {
+        self->setBackgroundColor(*paint);
+    }
+
+    const TextShadow* C_TextStyle_getShadows(const std::vector<TextShadow>* self, size_t* len_ref) {
+        auto len = self->size();
+        *len_ref = len;
+        return len ? self->data() : nullptr;
     }
 
     void C_TextStyle_addShadow(TextStyle* self, const TextShadow* shadow) {
@@ -371,6 +511,12 @@ extern "C" {
         self->resetShadows();
     }
 
+    const FontFeature* C_TextStyle_getFontFeatures(const std::vector<FontFeature>* self, size_t* len_ref) {
+        auto size = self->size();
+        *len_ref = size;
+        return size ? self->data() : nullptr;
+    }
+
     void C_TextStyle_addFontFeature(TextStyle* self, const SkString* fontFeature, int value) {
         self->addFontFeature(*fontFeature, value);
     }
@@ -378,7 +524,16 @@ extern "C" {
     void C_TextStyle_resetFontFeatures(TextStyle* self) {
         self->resetFontFeatures();
     }
-    
+
+    const FontArguments* C_TextStyle_getFontArguments(const TextStyle* self) {
+        auto& fontArguments = self->getFontArguments();
+        return fontArguments ? &*fontArguments : nullptr;
+    }
+
+    void C_TextStyle_setFontArguments(TextStyle* self, const SkFontArguments* arguments) {
+        self->setFontArguments(opt(arguments));
+    }
+
     const SkString* C_TextStyle_getFontFamilies(const TextStyle* self, size_t* count) {
         auto& v = self->getFontFamilies();
         *count = v.size();
@@ -392,24 +547,6 @@ extern "C" {
     void C_TextStyle_setTypeface(TextStyle* self, SkTypeface* typeface) {
         self->setTypeface(sk_sp<SkTypeface>(typeface));
     }
-}
-
-struct FontFeatures {
-    std::vector<FontFeature> fontFeatures;
-};
-
-extern "C" const FontFeature *C_FontFeatures_ptr_count(const FontFeatures *features, size_t *count) {
-    *count = features->fontFeatures.size();
-    return &features->fontFeatures.front();
-}
-
-struct TextShadows {
-    std::vector<TextShadow> textShadows;
-};
-
-extern "C" const TextShadow *C_TextShadows_ptr_count(const TextShadows *shadows, size_t *count) {
-    *count = shadows->textShadows.size();
-    return &shadows->textShadows.front();
 }
 
 //

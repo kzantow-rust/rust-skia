@@ -6,29 +6,33 @@ For information about the supported build targets and how to run the examples, p
 
 ## Documentation
 
-Function level documentation is [not yet](https://github.com/rust-skia/rust-skia/issues/23) available. To get started, take a look at the [Rust examples](https://github.com/rust-skia/rust-skia/tree/master/skia-org/src/) or the [Skia documentation](https://skia.org). 
+Function level documentation, ported from the Skia C++ headers, is available for a large part of the API. To get started, take a look at the [Rust examples](https://github.com/rust-skia/rust-skia/tree/master/skia-org/src/) or the [Skia documentation](https://skia.org). 
 
 ## Bindings & Wrappers
 
 Skia-safe wraps most parts of the public Skia C++ APIs:
 
 - [x] Vector Geometry: Matrix, Rect, Point, Size, etc.
-- [x] Most drawing related classes and functions: Surface, Canvas, Paint, Path.
-- [x] Effects and Shaders.
-- [x] Utility classes we think are useful.
+- [x] Most drawing related classes and functions: Surface, Canvas, Paint, Path
+- [x] Effects and Shaders
+- [x] Utility classes we think are useful
 - [x] PDF & SVG rendering
-- [ ] Skia Modules
+- [x] Skia Modules
   - [x] Text shaping with [Harfbuzz](https://www.freedesktop.org/wiki/Software/HarfBuzz/) and [ICU](http://site.icu-project.org/home).
   - [x] Text layout (skparagraph)
-  - [ ] Animation via [Skottie](https://skia.org/user/modules/skottie)
-- [x] GPU Backends
-  - [x] Vulkan
-  - [x] OpenGL
-  - [x] Metal
-  - [x] Direct3D
-  - [ ] WebGPU [Dawn](https://dawn.googlesource.com/dawn/)
+  - [x] Animation via [Skottie](https://skia.org/docs/user/modules/skottie/)
+- [ ] GPU Backends
+  - [ ] Ganesh
+    - [x] Vulkan
+    - [x] OpenGL
+    - [x] Metal
+    - [x] Direct3D
+  - [x] Graphite
+    - [x] Context creation (Metal, Vulkan)
+    - [x] `wgpu` devices, through Skia's Dawn backend (see the `wgpu` feature)
+    - [ ] Backend type wrappers (Metal and Vulkan `TextureInfo`, precompile, `ImageProvider`)
 
-Wrappers for functions that take callbacks and virtual classes are not supported right now. While we think they should be wrapped, the use cases related seem to be rather special, so we postponed that for now.
+Most wrappers don't require callbacks: Skia objects are created and manipulated directly. Where Skia needs to call back into Rust, skia-safe provides Rust traits and closures that Skia invokes through generated trampolines — for example the `RunHandler` trait for shaping, `ResourceProvider` for Skottie resources, `RustStream` for Rust I/O streams, and the Vulkan `GetProc` resolver. Classes that would require subclassing in C++ (such as `Drawable` and `RuntimeEffect`) are exposed as handles without a Rust subclassing interface yet; the cases where that matters are rather special, so we postponed them for now.
 
 ## Codecs
 
@@ -46,12 +50,14 @@ In addition to that, support for the WEBP image format can be enabled through th
 
 Skia-safe supports the following features that can be configured [via cargo](https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section):
 
+Skia provides the `ganesh` and `graphite` GPU rendering engines. Vulkan and Metal require one of these engine features to be selected explicitly. OpenGL and Direct3D use Ganesh and enable it implicitly.
+
 ### `gl`
 
 Platform support for OpenGL or OpenGL ES can be enabled by adding the feature `gl`. Since version `0.25.0`, rust-skia is configured by default to enable CPU rendering only. Before that, OpenGL support was included in every feature configuration. To render the examples with OpenGL, use
 
 ```bash
-(cd skia-org && cargo run --features gl [OUTPUT_DIR] --driver opengl)
+(cd skia-org && cargo run --features gl -- [OUTPUT_DIR] --driver gl)
 ```
 
 #### `egl`, `x11`, `wayland`
@@ -66,21 +72,37 @@ These features are configure the Window manager integration. They are supported 
 
 ### `vulkan`
 
-Vulkan support can be enabled by adding the feature `vulkan`. To render the examples with Vulkan, use
+Vulkan support can be enabled by adding `vulkan` and either `ganesh` or `graphite`. To render the Ganesh examples with Vulkan, use
 
 ```bash
-(cd skia-org && cargo run --features vulkan [OUTPUT_DIR] --driver vulkan)
+(cd skia-org && cargo run --features vulkan -- [OUTPUT_DIR] --driver vulkan)
 ```
 
 Note that Vulkan drivers need to be available. On Windows, they are most likely available already, on Linux [this article on linuxconfig.org](<https://linuxconfig.org/install-and-test-vulkan-on-linux>) might get you started, and on macOS with Metal support, [install the Vulkan SDK](<https://vulkan.lunarg.com/sdk/home>) for Mac and configure MoltenVK by setting the `DYLD_LIBRARY_PATH`, `VK_LAYER_PATH`, and `VK_ICD_FILENAMES` environment variables as described in `Documentation/getting_started_macos.html`.
 
 ### `metal`
 
-Support for Metal on macOS and iOS targets can be enabled by adding the feature `metal`.
+Support for Metal on macOS and iOS targets can be enabled by adding `metal` and either `ganesh` or `graphite`.
 
 ### `d3d`
 
 The Direct3D backend can be enabled for Windows targets by adding the feature `d3d`.
+
+### `wgpu`
+
+The `wgpu` backend is experimental.
+
+Skia renders with Graphite on the device and queue of a [`wgpu`](https://wgpu.rs) application, and into its textures. The module `skia_safe::gpu::graphite::wgpu` takes the application's `wgpu::Device`, `wgpu::Queue`, and `wgpu::Texture`.
+
+The feature `wgpu` selects the `wgpu` major version that this release recommends, which `skia_safe::wgpu` re-exports. An application that depends on `wgpu` itself enables the feature of its version instead, for example `wgpu-30`. A build enables exactly one of them.
+
+Skia uses its Dawn backend, and the [skia-wgpu](https://github.com/rust-skia/rust-skia/tree/master/skia-wgpu) crate implements the WebGPU functions that the backend calls on `wgpu`, so neither Dawn nor any other WebGPU implementation is linked. There are no prebuilt binaries with this feature yet: Skia is built from source, and the build downloads Dawn's WebGPU headers, so it does not work offline.
+
+To render the examples with Graphite on `wgpu`, use
+
+```bash
+(cd skia-org && cargo run --features wgpu -- [OUTPUT_DIR] --driver wgpu)
+```
 
 ### `textlayout`
 
@@ -88,17 +110,35 @@ The Cargo feature `textlayout` enables text shaping with Harfbuzz and ICU by pro
 
 The skshaper module can be accessed through `skia_safe::Shaper` and the Rust bindings for skparagraph are in the `skia_safe::textlayout` module. 
 
-On **Windows**, the file `icudtl.dat` must be available in your executable's directory. To provide the data file, either copy it from the build's output directory (shown when skia-bindings is compiled with `cargo build -vv | grep "ninja: Entering directory"`), or - if your executable directory is writable - invoke the function `skia_safe::icu::init()` before using the `skia_safe::Shaper` object or the `skia_safe::textlayout` module. 
+### `svg`
 
-Simple examples of the skshaper and skparagraph module bindings can be found [in the skia-org example command line application](https://github.com/rust-skia/rust-skia/blob/master/skia-org/src/).
+This feature enables support for rendering SVG files (`svg::Dom`).
+
+### `skottie`
+
+The Cargo feature `skottie` enables support for rendering Lottie animations through Skia's Skottie module. Skottie provides an API to load, parse, and render animations exported in the [Lottie JSON format](https://lottiefiles.github.io/lottie-docs/). The bindings are available in the `skia_safe::skottie` module.
 
 ### `webp-encode`, `webp-decode`, `webp`
 
-`webp-encode` enables support for encoding Skia bitmaps and images to the [WEBP](https://en.wikipedia.org/wiki/WebP) image format, and `web-decode` enables support for decoding WEBP to Skia bitmaps and images. The `webp` feature can be used as a shorthand to enable the `webp-encode` and `webp-decode` features.
+`webp-encode` enables support for encoding Skia bitmaps and images to the [WEBP](https://en.wikipedia.org/wiki/WebP) image format, and `webp-decode` enables support for decoding WEBP to Skia bitmaps and images. The `webp` feature can be used as a shorthand to enable the `webp-encode` and `webp-decode` features.
 
-### `binary-cache`
+### `binary-cache` (enabled by default)
 
-`binary-cache` enables download pre-built skia binaries instead of building them locally, it is enabled by default.
+`binary-cache` enables download pre-built skia binaries instead of building them locally.
+
+### `embed-icudtl` (enabled by default)
+
+Usually when Skia is used on **Windows**, the file `icudtl.dat` must be available in your executable's directory. But if this default feature is enabled, the `icudtl.dat` file is directly embedded in Rust and is automatically initialized before any of the `textlayout` features are used.
+
+If this feature is disabled, the `icudtl.dat` file needs to be copied from the build's output directory to the executable's directory. If your executable directory is writable, this can be done by calling the function `skia_safe::icu::init()` before the `skia_safe::textlayout` module is used.
+
+The output directory is displayed when skia-bindings is compiled with `cargo build -vv | grep "ninja: Entering directory"`, 
+
+Simple examples of how to use the `skshaper` and `skparagraph` module bindings can be found [in the skia-org example command line application](https://github.com/rust-skia/rust-skia/blob/master/skia-org/src/).
+
+### `embed-freetype`
+
+On most platforms, Skia builds and runs well with the [FreeType](https://freetype.org/) version that is already installed. If you encounter FreeType related build errors on older platforms (like with for example Debian 9 "stretch"), `embed-freetype` makes sure that FreeType is built and embedded alongside with Skia.
 
 ## Multithreading
 

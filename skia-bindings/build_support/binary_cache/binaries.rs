@@ -1,9 +1,10 @@
 //! Support for exporting and building prebuilt binaries.
 
 use super::{git, github_actions};
-use crate::build_support::{cargo, skia};
+use crate::build_support::{binaries_config, cargo, features::Features};
 use flate2::read::GzDecoder;
 use std::{
+    collections::HashSet,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -19,9 +20,10 @@ pub fn should_export() -> Option<PathBuf> {
 
 /// Export the binaries to a target directory.
 ///
-/// `source_files` are additional files from below skia-bindings/ that are copied to the target directory.
+/// `source_files` are additional files from below skia-bindings/ that are copied to the target
+/// directory.
 pub fn export(
-    config: &skia::BinariesConfiguration,
+    config: &binaries_config::BinariesConfiguration,
     source_files: &[(&str, &str)],
     target_dir: &Path,
 ) -> io::Result<()> {
@@ -35,20 +37,7 @@ pub fn export(
         fs::copy(PathBuf::from(src), export_dir.join(PathBuf::from(dst)))?;
     }
 
-    let output_directory = &config.output_directory;
-
-    let target = cargo::target();
-
-    for lib in &config.built_libraries {
-        let filename = &target.library_to_filename(lib);
-        fs::copy(output_directory.join(filename), export_dir.join(filename))?;
-    }
-
-    for file in &config.additional_files {
-        fs::copy(output_directory.join(file), export_dir.join(file))?;
-    }
-
-    Ok(())
+    config.export(&export_dir)
 }
 
 /// Prepares the binaries directory and sets the tag.txt and key.txt
@@ -81,7 +70,7 @@ pub const ARCHIVE_NAME: &str = "skia-binaries";
 /// Every part of the key is separated by '-' and no grouping / enclosing characters are used
 /// because GitHub strips them from the filenames (tested "<>[]{}()",
 /// and also Unicode characters seem to be stripped).
-pub fn key(repository_short_hash: &str, features: &[impl AsRef<str>], skia_debug: bool) -> String {
+pub fn key(repository_short_hash: &str, features: &Features, skia_debug: bool) -> String {
     let mut components = Vec::new();
 
     fn group(str: impl AsRef<str>) -> String {
@@ -95,17 +84,9 @@ pub fn key(repository_short_hash: &str, features: &[impl AsRef<str>], skia_debug
     // The target architecture, vendor, system, and abi if specified.
     components.push(group(cargo::target().to_string()));
 
-    // features, sorted and duplicates removed.
+    // Features, sorted.
     if !features.is_empty() {
-        let features: String = {
-            let mut features: Vec<String> =
-                features.iter().map(|f| f.as_ref().to_string()).collect();
-            features.sort();
-            features.dedup();
-            features.join("-")
-        };
-
-        components.push(group(features));
+        components.push(group(features.to_key()));
     };
 
     if cargo::target_crt_static() {
@@ -121,6 +102,8 @@ pub fn key(repository_short_hash: &str, features: &[impl AsRef<str>], skia_debug
 
 /// Prepare the final download URL for the prebuilt binaries archive.
 pub fn download_url(url_template: String, tag: impl AsRef<str>, key: impl AsRef<str>) -> String {
+    #[allow(unknown_lints)]
+    #[allow(clippy::literal_string_with_formatting_args)]
     url_template
         .replace("{tag}", tag.as_ref())
         .replace("{key}", key.as_ref())

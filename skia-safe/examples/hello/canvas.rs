@@ -1,16 +1,17 @@
-use skia_safe::{Color, Data, EncodedImageFormat, Paint, PaintStyle, Path, Surface};
-use std::mem;
+use skia_safe::{
+    Color, Data, EncodedImageFormat, Paint, PaintStyle, PathBuilder, Surface, surfaces,
+};
 
 pub struct Canvas {
     surface: Surface,
-    path: Path,
+    path: PathBuilder,
     paint: Paint,
 }
 
 impl Canvas {
     pub fn new(width: i32, height: i32) -> Canvas {
-        let mut surface = Surface::new_raster_n32_premul((width, height)).expect("no surface!");
-        let path = Path::new();
+        let mut surface = surfaces::raster_n32_premul((width, height)).expect("surface");
+        let path = PathBuilder::new();
         let mut paint = Paint::default();
         paint.set_color(Color::BLACK);
         paint.set_anti_alias(true);
@@ -68,21 +69,25 @@ impl Canvas {
 
     #[inline]
     pub fn begin_path(&mut self) {
-        let new_path = Path::new();
-        self.surface.canvas().draw_path(&self.path, &self.paint);
-        let _ = mem::replace(&mut self.path, new_path);
+        self.surface
+            .canvas()
+            .draw_path(&self.path.detach(), &self.paint);
     }
 
     #[inline]
     pub fn stroke(&mut self) {
         self.paint.set_style(PaintStyle::Stroke);
-        self.surface.canvas().draw_path(&self.path, &self.paint);
+        self.surface
+            .canvas()
+            .draw_path(&self.path.snapshot(), &self.paint);
     }
 
     #[inline]
     pub fn fill(&mut self) {
         self.paint.set_style(PaintStyle::Fill);
-        self.surface.canvas().draw_path(&self.path, &self.paint);
+        self.surface
+            .canvas()
+            .draw_path(&self.path.snapshot(), &self.paint);
     }
 
     #[inline]
@@ -93,11 +98,14 @@ impl Canvas {
     #[inline]
     pub fn data(&mut self) -> Data {
         let image = self.surface.image_snapshot();
-        image.encode_to_data(EncodedImageFormat::PNG).unwrap()
+        let mut context = self.surface.direct_context();
+        image
+            .encode(context.as_mut(), EncodedImageFormat::PNG, None)
+            .unwrap()
     }
 
     #[inline]
-    fn canvas(&mut self) -> &mut skia_safe::Canvas {
+    fn canvas(&mut self) -> &skia_safe::Canvas {
         self.surface.canvas()
     }
 }

@@ -1,85 +1,58 @@
-use crate::prelude::*;
 use skia_bindings as sb;
-use std::ptr;
+use skia_bindings::skgpu_GpuStats;
 
-pub use skia_bindings::GrBackendApi as BackendAPI;
-#[test]
-fn test_backend_api_layout() {
-    let _ = BackendAPI::Dawn;
-}
+/// Possible 3D APIs that may be used by Graphite.
+///
+/// Note: Graphite doesn't support some context types (e.g. Direct3D) and will return
+/// [`BackendApi::Unsupported`].
+pub use sb::skgpu_BackendApi as BackendApi;
+variant_name!(BackendApi::Metal);
 
-// TODO: this should be a newtype(bool) I guess with implementations
-//       of From<bool> and Deref?
-pub use skia_bindings::GrMipmapped as Mipmapped;
-
-#[deprecated(since = "0.35.0", note = "Use Mipmapped (with a lowercase 'm')")]
-pub use skia_bindings::GrMipmapped as MipMapped;
-
-#[test]
-fn test_mipmapped_naming() {
-    let _ = Mipmapped::Yes;
-}
-
-// TODO: this should be a newtype(bool) I guess with implementations
-//       of From<bool> and Deref?
-pub use skia_bindings::GrRenderable as Renderable;
-#[test]
-fn test_renderable_naming() {
-    let _ = Renderable::No;
-}
-
-// TODO: this should be a newtype(bool) I guess with implementations
-//       of From<bool> and Deref?
-pub use skia_bindings::GrProtected as Protected;
-#[test]
-fn test_protected_naming() {
-    let _ = Protected::Yes;
-}
-
-pub use skia_bindings::GrSurfaceOrigin as SurfaceOrigin;
-#[test]
-fn test_surface_origin_naming() {
-    let _ = SurfaceOrigin::TopLeft;
-}
-
-// Note: BackendState is in gl/types.rs/
-
+/// Indicates whether an allocation should count against a cache budget.
 #[repr(C)]
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct FlushInfo {
-    // TODO: wrap access to the following fields in a safe way:
-    num_semaphores: std::os::raw::c_int,
-    signal_semaphores: *mut sb::GrBackendSemaphore,
-    finished_proc: sb::GrGpuFinishedProc,
-    finished_context: sb::GrGpuFinishedContext,
-    submitted_proc: sb::GrGpuSubmittedProc,
-    submitted_context: sb::GrGpuSubmittedContext,
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Budgeted(bool);
+native_transmutable!(sb::skgpu_Budgeted, Budgeted);
+
+#[allow(non_upper_case_globals)]
+impl Budgeted {
+    // we want this look like enum case names.
+    pub const No: Budgeted = Budgeted(false);
+    pub const Yes: Budgeted = Budgeted(true);
 }
 
-impl Default for FlushInfo {
-    fn default() -> Self {
-        Self {
-            num_semaphores: 0,
-            signal_semaphores: ptr::null_mut(),
-            finished_proc: None,
-            finished_context: ptr::null_mut(),
-            submitted_proc: None,
-            submitted_context: ptr::null_mut(),
-        }
+// TODO: CallbackResult
+
+/// Is the texture mipmapped or not.
+pub use skia_bindings::skgpu_Mipmapped as Mipmapped;
+
+/// Is the data protected on the GPU or not.
+pub use skia_bindings::skgpu_Protected as Protected;
+variant_name!(Protected::Yes);
+
+#[cfg(feature = "ganesh")]
+pub use skia_bindings::skgpu_Renderable as Renderable;
+#[cfg(feature = "ganesh")]
+variant_name!(Renderable::No);
+
+/// What is the logical origin of a `BackendTexture` passed into Skia.
+pub use skia_bindings::skgpu_Origin as Origin;
+variant_name!(Origin::TopLeft);
+
+bitflags! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GpuStatsFlags : u32 {
+        const NONE = sb::skgpu_GpuStatsFlags_kNone as _;
+        const ELAPSED_TIME = sb::skgpu_GpuStatsFlags_kElapsedTime as _;
+        const OCCLUSION_PASS_SAMPLES = sb::skgpu_GpuStatsFlags_kOcclusionPassSamples as _;
     }
 }
 
-impl NativeTransmutable<sb::GrFlushInfo> for FlushInfo {}
-#[test]
-fn test_flush_info_layout() {
-    FlushInfo::test_layout();
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct GpuStats {
+    pub elapsed_time: u64,
+    pub num_occlusion_pass_samples: u64,
 }
 
-pub use sb::GrSemaphoresSubmitted as SemaphoresSubmitted;
-#[test]
-fn test_semaphores_submitted_naming() {
-    let _ = SemaphoresSubmitted::Yes;
-}
-
-// TODO: wrap GrPrepareForExternalIORequests
+native_transmutable!(skgpu_GpuStats, GpuStats);

@@ -1,26 +1,32 @@
-use crate::prelude::*;
-use crate::private::safe32::{sk32, sk64};
-use crate::{scalar, Contains, IPoint, ISize, IVector, Point, Size, Vector};
-use skia_bindings as sb;
-use skia_bindings::{SkIRect, SkRect};
-use std::cmp::{max, min};
-use std::mem;
+use std::{
+    cmp::{max, min},
+    mem,
+};
+
+use crate::{
+    Contains, IPoint, ISize, IVector, PathDirection, Point, Size, Vector, interop,
+    prelude::*,
+    private::{
+        is_finite,
+        safe32::{sk32, sk64},
+    },
+};
+use skia_bindings::{self as sb, SkIRect, SkRect};
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
 pub struct IRect {
+    /// The x coordinate of the rectangle's left edge.
     pub left: i32,
+    /// The y coordinate of the rectangle's top edge.
     pub top: i32,
+    /// The x coordinate of the rectangle's right edge.
     pub right: i32,
+    /// The y coordinate of the rectangle's bottom edge.
     pub bottom: i32,
 }
 
-impl NativeTransmutable<SkIRect> for IRect {}
-
-#[test]
-fn test_irect_layout() {
-    IRect::test_layout();
-}
+native_transmutable!(SkIRect, IRect);
 
 impl AsRef<IRect> for IRect {
     fn as_ref(&self) -> &IRect {
@@ -76,48 +82,48 @@ impl IRect {
         }
     }
 
-    pub fn left(&self) -> i32 {
+    pub const fn left(&self) -> i32 {
         self.left
     }
 
-    pub fn top(&self) -> i32 {
+    pub const fn top(&self) -> i32 {
         self.top
     }
 
-    pub fn right(&self) -> i32 {
+    pub const fn right(&self) -> i32 {
         self.right
     }
 
-    pub fn bottom(&self) -> i32 {
+    pub const fn bottom(&self) -> i32 {
         self.bottom
     }
 
-    pub fn x(&self) -> i32 {
+    pub const fn x(&self) -> i32 {
         self.left
     }
 
-    pub fn y(&self) -> i32 {
+    pub const fn y(&self) -> i32 {
         self.top
     }
 
-    pub fn width(&self) -> i32 {
+    pub const fn width(&self) -> i32 {
         sk32::can_overflow_sub(self.right, self.left)
     }
 
-    pub fn height(&self) -> i32 {
+    pub const fn height(&self) -> i32 {
         sk32::can_overflow_sub(self.bottom, self.top)
     }
 
-    pub fn size(&self) -> ISize {
-        (self.width(), self.height()).into()
+    pub const fn size(&self) -> ISize {
+        ISize::new(self.width(), self.height())
     }
 
-    pub fn width_64(&self) -> i64 {
-        i64::from(self.right) - i64::from(self.left)
+    pub const fn width_64(&self) -> i64 {
+        self.right as i64 - self.left as i64
     }
 
-    pub fn height_64(&self) -> i64 {
-        i64::from(self.bottom) - i64::from(self.top)
+    pub const fn height_64(&self) -> i64 {
+        self.bottom as i64 - self.top as i64
     }
 
     pub fn is_empty_64(&self) -> bool {
@@ -145,6 +151,14 @@ impl IRect {
         self.top = 0;
         self.right = width;
         self.bottom = height;
+    }
+
+    pub fn set_size(&mut self, size: impl Into<ISize>) {
+        let size = size.into();
+        self.left = 0;
+        self.top = 0;
+        self.right = size.width;
+        self.bottom = size.height;
     }
 
     #[must_use]
@@ -229,9 +243,10 @@ impl IRect {
         self.left <= r.left && self.top <= r.top && self.right >= r.right && self.bottom >= r.bottom
     }
 
+    #[must_use]
     pub fn intersect(a: &Self, b: &Self) -> Option<Self> {
         let mut r = Self::default();
-        unsafe { r.native_mut().intersect(a.native(), b.native()) }.if_true_some(r)
+        unsafe { r.native_mut().intersect(a.native(), b.native()) }.then_some(r)
     }
 
     pub fn intersects(a: &Self, b: &Self) -> bool {
@@ -246,9 +261,20 @@ impl IRect {
             min(a.right, b.right),
             min(a.bottom, b.bottom),
         );
-        r.is_empty().if_false_some(r)
+        (!r.is_empty()).then_some(r)
     }
 
+    /// Returns the union of `a` and `b`.
+    ///
+    /// Has no effect if `b` is empty. Otherwise, if `a` is empty, returns `b`.
+    ///
+    /// The C++ mutating variant `join(const SkIRect&)` is not wrapped; this static version
+    /// returns a new rectangle instead.
+    ///
+    /// - `a` rectangle to join
+    /// - `b` expansion rectangle
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@IRect_join_2>
     pub fn join(a: &Self, b: &Self) -> Self {
         let mut copied = *a;
         unsafe { copied.native_mut().join(b.native()) }
@@ -267,6 +293,10 @@ impl IRect {
             max(self.left, self.right),
             max(self.top, self.bottom),
         )
+    }
+
+    pub fn as_i32s(&self) -> &[i32] {
+        unsafe { safer::from_raw_parts(&self.left, 4) }
     }
 
     #[deprecated(since = "0.27.0", note = "removed without replacement")]
@@ -322,18 +352,17 @@ impl Contains<Rect> for IRect {
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
 pub struct Rect {
-    pub left: scalar,
-    pub top: scalar,
-    pub right: scalar,
-    pub bottom: scalar,
+    /// The x coordinate of the rectangle's left edge.
+    pub left: f32,
+    /// The y coordinate of the rectangle's top edge.
+    pub top: f32,
+    /// The x coordinate of the rectangle's right edge.
+    pub right: f32,
+    /// The y coordinate of the rectangle's bottom edge.
+    pub bottom: f32,
 }
 
-impl NativeTransmutable<SkRect> for Rect {}
-
-#[test]
-fn test_rect_layout() {
-    Rect::test_layout();
-}
+native_transmutable!(SkRect, Rect);
 
 impl AsRef<Rect> for Rect {
     fn as_ref(&self) -> &Rect {
@@ -342,7 +371,8 @@ impl AsRef<Rect> for Rect {
 }
 
 impl Rect {
-    pub fn new(left: scalar, top: scalar, right: scalar, bottom: scalar) -> Self {
+    #[must_use]
+    pub fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
         Self {
             left,
             top,
@@ -355,38 +385,50 @@ impl Rect {
         Self::new(0.0, 0.0, 0.0, 0.0)
     }
 
-    pub fn from_wh(w: scalar, h: scalar) -> Self {
+    #[must_use]
+    pub fn from_wh(w: f32, h: f32) -> Self {
         Self::new(0.0, 0.0, w, h)
     }
 
+    #[must_use]
     pub fn from_iwh(w: i32, h: i32) -> Self {
-        Self::from_wh(w as scalar, h as scalar)
+        Self::from_wh(w as f32, h as f32)
     }
 
+    #[must_use]
     pub fn from_size(size: impl Into<Size>) -> Self {
         (Point::default(), size.into()).into()
     }
 
-    pub fn from_xywh(x: scalar, y: scalar, w: scalar, h: scalar) -> Self {
+    #[must_use]
+    pub fn from_ltrb(l: f32, t: f32, r: f32, b: f32) -> Self {
+        Self::new(l, t, r, b)
+    }
+
+    #[must_use]
+    pub fn from_xywh(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self::new(x, y, x + w, y + h)
     }
 
+    #[must_use]
     pub fn from_point_and_size(p: impl Into<Point>, sz: impl Into<Size>) -> Self {
         (p.into(), sz.into()).into()
     }
 
+    #[must_use]
     pub fn from_isize(isize: impl Into<ISize>) -> Self {
         let isize = isize.into();
         Self::from_iwh(isize.width, isize.height)
     }
 
+    #[must_use]
     pub fn from_irect(irect: impl AsRef<IRect>) -> Self {
         let irect = irect.as_ref();
         Self::new(
-            irect.left as scalar,
-            irect.top as scalar,
-            irect.right as scalar,
-            irect.bottom as scalar,
+            irect.left as f32,
+            irect.top as f32,
+            irect.right as f32,
+            irect.bottom as f32,
         )
     }
 
@@ -401,41 +443,30 @@ impl Rect {
     }
 
     pub fn is_finite(&self) -> bool {
-        let mut accum: f32 = 0.0;
-        accum *= self.left;
-        accum *= self.top;
-        accum *= self.right;
-        accum *= self.bottom;
-
-        // accum is either NaN or it is finite (zero).
-        debug_assert!(0.0 == accum || accum.is_nan());
-
-        // value==value will be true iff value is not NaN
-        // TODO: is it faster to say !accum or accum==accum?
-        !accum.is_nan()
+        is_finite(&[self.left, self.top, self.right, self.bottom])
     }
 
-    pub fn x(&self) -> scalar {
+    pub const fn x(&self) -> f32 {
         self.left
     }
 
-    pub fn y(&self) -> scalar {
+    pub const fn y(&self) -> f32 {
         self.top
     }
 
-    pub fn left(&self) -> scalar {
+    pub const fn left(&self) -> f32 {
         self.left
     }
 
-    pub fn top(&self) -> scalar {
+    pub const fn top(&self) -> f32 {
         self.top
     }
 
-    pub fn right(&self) -> scalar {
+    pub const fn right(&self) -> f32 {
         self.right
     }
 
-    pub fn bottom(&self) -> scalar {
+    pub const fn bottom(&self) -> f32 {
         self.bottom
     }
 
@@ -443,32 +474,64 @@ impl Rect {
         (self.width(), self.height()).into()
     }
 
-    pub fn width(&self) -> scalar {
+    pub fn width(&self) -> f32 {
         self.native().fRight - self.native().fLeft
     }
 
-    pub fn height(&self) -> scalar {
+    pub fn height(&self) -> f32 {
         self.native().fBottom - self.native().fTop
+    }
+
+    pub fn center_x(&self) -> f32 {
+        // don't use (fLeft + fBottom) * 0.5 as that might overflow before the 0.5
+        self.left * 0.5 + self.right * 0.5
+    }
+
+    pub fn center_y(&self) -> f32 {
+        // don't use (fTop + fBottom) * 0.5 as that might overflow before the 0.5
+        self.top * 0.5 + self.bottom * 0.5
     }
 
     pub fn center(&self) -> Point {
         Point::from((self.center_x(), self.center_y()))
     }
 
-    pub fn center_x(&self) -> scalar {
-        // don't use (fLeft + fBottom) * 0.5 as that might overflow before the 0.5
-        self.left * 0.5 + self.right * 0.5
+    pub fn tl(&self) -> Point {
+        Point::from((self.left, self.top))
     }
 
-    pub fn center_y(&self) -> scalar {
-        // don't use (fTop + fBottom) * 0.5 as that might overflow before the 0.5
-        self.top * 0.5 + self.bottom * 0.5
+    pub fn tr(&self) -> Point {
+        Point::from((self.right, self.top))
     }
 
-    pub fn to_quad(self) -> [Point; 4] {
-        let mut quad = [Point::default(); 4];
-        unsafe { self.native().toQuad(quad.native_mut().as_mut_ptr()) }
-        quad
+    pub fn bl(&self) -> Point {
+        Point::from((self.left, self.bottom))
+    }
+
+    pub fn br(&self) -> Point {
+        Point::from((self.right, self.bottom))
+    }
+
+    pub fn to_quad(&self, dir: impl Into<Option<PathDirection>>) -> [Point; 4] {
+        let mut pts = [Point::default(); 4];
+        self.copy_to_quad(&mut pts, dir);
+        pts
+    }
+
+    pub fn copy_to_quad(&self, pts: &mut [Point], dir: impl Into<Option<PathDirection>>) {
+        debug_assert!(pts.len() >= 4);
+        pts[0] = self.tl();
+        pts[2] = self.br();
+        match dir.into().unwrap_or(PathDirection::CW) {
+            PathDirection::CW => {
+                pts[1] = self.tr();
+                pts[3] = self.bl();
+            }
+            PathDirection::CCW => {
+                pts[1] = self.bl();
+                pts[3] = self.tr();
+            }
+        }
     }
 
     pub fn set_empty(&mut self) {
@@ -480,28 +543,50 @@ impl Rect {
         *self = Self::from_irect(irect)
     }
 
-    pub fn set_ltrb(&mut self, left: scalar, top: scalar, right: scalar, bottom: scalar) {
+    pub fn set_ltrb(&mut self, left: f32, top: f32, right: f32, bottom: f32) {
         *self = Self::new(left, top, right, bottom)
     }
 
-    pub fn set_bounds(&mut self, points: &[Point]) {
-        unsafe {
-            self.native_mut()
-                .setBoundsCheck(points.native().as_ptr(), points.len().try_into().unwrap());
-        }
+    pub fn bounds(pts: &[Point]) -> Option<Rect> {
+        let mut bounds = Rect::default();
+        unsafe { sb::C_SkRect_Bounds(pts.native().as_ptr(), pts.len(), bounds.native_mut()) }
+            .then_some(bounds)
     }
 
+    pub fn bounds_or_empty(pts: &[Point]) -> Rect {
+        Self::bounds(pts).unwrap_or_else(Self::new_empty)
+    }
+
+    pub fn set_bounds(&mut self, points: &[Point]) {
+        self.set_bounds_check(points);
+    }
+
+    /// Sets to the bounds of the span of points, and returns true (if all point values were
+    /// finite).
+    ///
+    /// If the span is empty, sets the rect to empty and returns true. If any point contains an
+    /// infinity or NaN, sets the rect to empty and returns false.
+    ///
+    /// - `points` point span
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Rect_setBoundsCheck>
     pub fn set_bounds_check(&mut self, points: &[Point]) -> bool {
         unsafe {
-            self.native_mut()
-                .setBoundsCheck(points.native().as_ptr(), points.len().try_into().unwrap())
+            sb::C_SkRect_setBoundsCheck(self.native_mut(), points.native().as_ptr(), points.len())
         }
     }
 
+    /// Sets to the bounds of the span of points.
+    ///
+    /// If the span is empty, sets the rect to empty. If any point contains an infinity or NaN,
+    /// sets the rect to NaN.
+    ///
+    /// - `points` point span
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Rect_setBoundsNoCheck>
     pub fn set_bounds_no_check(&mut self, points: &[Point]) {
         unsafe {
-            self.native_mut()
-                .setBoundsNoCheck(points.native().as_ptr(), points.len().try_into().unwrap())
+            sb::C_SkRect_setBoundsNoCheck(self.native_mut(), points.native().as_ptr(), points.len())
         }
     }
 
@@ -515,18 +600,14 @@ impl Rect {
 
     pub fn from_bounds(points: &[Point]) -> Option<Self> {
         let mut r = Self::default();
-        unsafe {
-            r.native_mut()
-                .setBoundsCheck(points.native().as_ptr(), points.len().try_into().unwrap())
-        }
-        .if_true_some(r)
+        r.set_bounds_check(points).then_some(r)
     }
 
-    pub fn set_xywh(&mut self, x: scalar, y: scalar, width: scalar, height: scalar) {
+    pub fn set_xywh(&mut self, x: f32, y: f32, width: f32, height: f32) {
         *self = Self::from_xywh(x, y, width, height)
     }
 
-    pub fn set_wh(&mut self, w: scalar, h: scalar) {
+    pub fn set_wh(&mut self, w: f32, h: f32) {
         *self = Self::from_wh(w, h)
     }
 
@@ -534,6 +615,7 @@ impl Rect {
         *self = Self::from_iwh(width, height)
     }
 
+    #[must_use]
     pub fn with_offset(&self, d: impl Into<Vector>) -> Self {
         let d = d.into();
         Self::new(
@@ -544,6 +626,7 @@ impl Rect {
         )
     }
 
+    #[must_use]
     pub fn with_inset(&self, d: impl Into<Vector>) -> Self {
         let d = d.into();
         Self::new(
@@ -554,6 +637,7 @@ impl Rect {
         )
     }
 
+    #[must_use]
     pub fn with_outset(&self, d: impl Into<Vector>) -> Self {
         let d = d.into();
         Self::new(
@@ -572,6 +656,7 @@ impl Rect {
         *self = self.with_offset_to(new_p)
     }
 
+    #[must_use]
     pub fn with_offset_to(&self, new_p: impl Into<Point>) -> Self {
         let new_p = new_p.into();
         Self::new(new_p.x, new_p.y, new_p.x - self.left, new_p.y - self.top)
@@ -585,6 +670,15 @@ impl Rect {
         *self = self.with_outset(d)
     }
 
+    /// Returns true if this rectangle intersects `r`, and sets this rectangle to the
+    /// intersection. Returns false if this rectangle does not intersect `r`, and leaves this
+    /// rectangle unchanged.
+    ///
+    /// Returns false if either `r` or this rectangle is empty, leaving this rectangle unchanged.
+    ///
+    /// - `r` limit of result
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Rect_intersect>
     pub fn intersect(&mut self, r: impl AsRef<Rect>) -> bool {
         unsafe { self.native_mut().intersect(r.as_ref().native()) }
     }
@@ -616,16 +710,7 @@ impl Rect {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn intersects_(
-        al: scalar,
-        at: scalar,
-        ar: scalar,
-        ab: scalar,
-        bl: scalar,
-        bt: scalar,
-        br: scalar,
-        bb: scalar,
-    ) -> bool {
+    fn intersects_(al: f32, at: f32, ar: f32, ab: f32, bl: f32, bt: f32, br: f32, bb: f32) -> bool {
         let l = al.max(bl);
         let r = ar.min(br);
         let t = at.max(bt);
@@ -633,6 +718,14 @@ impl Rect {
         l < r && t < b
     }
 
+    /// Sets this rectangle to the union of itself and `r`.
+    ///
+    /// Has no effect if `r` is empty. Otherwise, if this rectangle is empty, sets this rectangle
+    /// to `r`.
+    ///
+    /// - `r` expansion rectangle
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Rect_join_2>
     pub fn join(&mut self, r: impl AsRef<Rect>) {
         let r = r.as_ref();
         unsafe { self.native_mut().join(r.native()) }
@@ -700,12 +793,24 @@ impl Rect {
         )
     }
 
-    pub fn as_scalars(&self) -> &[scalar; 4] {
+    pub fn as_scalars(&self) -> &[f32; 4] {
         unsafe { transmute_ref(&self.left) }
     }
 
+    /// Writes a text representation of this rectangle to standard output. Set `as_hex` to true to
+    /// generate exact binary representations of floating point numbers.
+    ///
+    /// - `as_hex` true if scalar values are written as hexadecimal
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Rect_dump>
     pub fn dump(&self, as_hex: impl Into<Option<bool>>) {
         unsafe { self.native().dump(as_hex.into().unwrap_or_default()) }
+    }
+
+    pub fn dump_to_string(&self, as_hex: bool) -> String {
+        let mut str = interop::String::default();
+        unsafe { sb::C_SkRect_dumpToString(self.native(), as_hex, str.native_mut()) }
+        str.to_string()
     }
 
     pub fn dump_hex(&self) {
@@ -715,12 +820,24 @@ impl Rect {
 
 impl Contains<Point> for Rect {
     fn contains(&self, p: Point) -> bool {
+        self.contains(&p)
+    }
+}
+
+impl Contains<&Point> for Rect {
+    fn contains(&self, p: &Point) -> bool {
         p.x >= self.left && p.x < self.right && p.y >= self.top && p.y < self.bottom
     }
 }
 
 impl Contains<Rect> for Rect {
     fn contains(&self, r: Rect) -> bool {
+        self.contains(&r)
+    }
+}
+
+impl Contains<&Rect> for Rect {
+    fn contains(&self, r: &Rect) -> bool {
         // TODO: can we eliminate the this->is_empty check?
         !r.is_empty()
             && !self.is_empty()
@@ -733,13 +850,19 @@ impl Contains<Rect> for Rect {
 
 impl Contains<IRect> for Rect {
     fn contains(&self, r: IRect) -> bool {
+        self.contains(&r)
+    }
+}
+
+impl Contains<&IRect> for Rect {
+    fn contains(&self, r: &IRect) -> bool {
         // TODO: can we eliminate the this->isEmpty check?
         !r.is_empty()
             && !self.is_empty()
-            && self.left <= r.left as scalar
-            && self.top <= r.top as scalar
-            && self.right >= r.right as scalar
-            && self.bottom >= r.bottom as scalar
+            && self.left <= r.left as f32
+            && self.top <= r.top as f32
+            && self.right >= r.right as f32
+            && self.bottom >= r.bottom as f32
     }
 }
 

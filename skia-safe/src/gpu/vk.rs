@@ -1,12 +1,23 @@
+//! Vulkan types and helpers shared by the Ganesh and Graphite backends, plus the
+//! Vulkan [`BackendContext`] used to create a Ganesh [`crate::gpu::DirectContext`].
+
+use std::{ops::Deref, ptr};
+
 use skia_bindings as sb;
-use std::ops::Deref;
-use std::ptr;
 
-mod backend_context;
-pub use backend_context::*;
+pub mod vulkan_backend_context;
+mod vulkan_backend_context_builder;
+mod vulkan_mutable_texture_state;
+mod vulkan_types;
 
-mod types;
-pub use types::*;
+#[cfg(feature = "ganesh")]
+pub use super::ganesh::vk::vk_types::*;
+pub use vulkan_backend_context::*;
+pub use vulkan_mutable_texture_state::*;
+pub use vulkan_types::*;
+
+#[cfg(feature = "ganesh")]
+pub use crate::gpu::ganesh::vk::BackendDrawableInfo;
 
 //
 // Additional Vulkan re-exports and definitions.
@@ -16,6 +27,8 @@ pub use sb::VkBool32 as Bool32;
 pub use sb::VkBuffer as Buffer;
 pub use sb::VkChromaLocation as ChromaLocation;
 pub use sb::VkCommandBuffer as CommandBuffer;
+pub use sb::VkComponentMapping as ComponentMapping;
+pub use sb::VkComponentSwizzle as ComponentSwizzle;
 pub use sb::VkDevice as Device;
 pub use sb::VkDeviceMemory as DeviceMemory;
 pub use sb::VkDeviceSize as DeviceSize;
@@ -38,6 +51,7 @@ pub use sb::VkRect2D as Rect2D;
 pub use sb::VkRenderPass as RenderPass;
 pub use sb::VkSamplerYcbcrModelConversion as SamplerYcbcrModelConversion;
 pub use sb::VkSamplerYcbcrRange as SamplerYcbcrRange;
+pub use sb::VkSemaphore as Semaphore;
 pub use sb::VkSharingMode as SharingMode;
 
 pub const QUEUE_FAMILY_IGNORED: u32 = !0;

@@ -1,17 +1,15 @@
-use crate::{prelude::*, Color, ColorFilter};
-use skia_bindings as sb;
+//! Deprecated color filter factory functions, use [`crate::color_filters::lighting()`] instead.
+
+use crate::{Color, ColorFilter, color_filters};
 
 impl ColorFilter {
+    #[deprecated(since = "0.56.0", note = "Use color_filters::lighting()")]
     pub fn new_lighting(mul: impl Into<Color>, add: impl Into<Color>) -> Option<Self> {
-        new_lighting(mul, add)
+        color_filters::lighting(mul, add)
     }
 }
 
+#[deprecated(since = "0.56.0", note = "Use color_filters::lighting()")]
 pub fn new_lighting(mul: impl Into<Color>, add: impl Into<Color>) -> Option<ColorFilter> {
-    ColorFilter::from_ptr(unsafe {
-        sb::C_SkColorMatrixFilter_MakeLightingFilter(
-            mul.into().into_native(),
-            add.into().into_native(),
-        )
-    })
+    color_filters::lighting(mul, add)
 }

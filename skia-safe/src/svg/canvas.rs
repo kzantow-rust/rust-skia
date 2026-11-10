@@ -1,18 +1,21 @@
-use crate::interop::DynamicMemoryWStream;
-use crate::prelude::*;
-use crate::{Data, Rect};
-use skia_bindings as sb;
-use skia_bindings::SkCanvas;
-use std::pin::Pin;
-use std::ptr;
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-};
+//! A [`crate::svg::Canvas`] that records drawing operations and emits them as SVG.
+use std::{fmt, ops::Deref, ptr};
+
+use skia_bindings::{self as sb, SkCanvas, SkDynamicMemoryWStream};
+
+use crate::{Data, Rect, interop::DynamicMemoryWStream, prelude::*};
 
 pub struct Canvas {
     canvas: *mut SkCanvas,
-    stream: Pin<Box<DynamicMemoryWStream>>,
+    /// The stream the SVG canvas writes into.
+    ///
+    /// C++ keeps a pointer to the stream until the canvas is deleted. The stream lives on the
+    /// heap, so its address stays the same when this `Canvas` moves. It is held through a raw
+    /// pointer instead of a `Box`, because Rust assumes that nothing else changes the contents of
+    /// a `Box` while the value that owns it is passed to a function. C++ writes to the stream
+    /// during such calls, for example when [`Canvas::end()`] deletes the canvas, and with a `Box`
+    /// that would be undefined behavior.
+    stream: ptr::NonNull<DynamicMemoryWStream>,
 }
 
 impl Drop for Canvas {
@@ -20,6 +23,7 @@ impl Drop for Canvas {
         unsafe {
             sb::C_SkCanvas_delete(self.canvas);
         }
+        drop(unsafe { Box::from_raw(self.stream.as_ptr()) });
     }
 }
 
@@ -27,32 +31,26 @@ impl Deref for Canvas {
     type Target = crate::Canvas;
 
     fn deref(&self) -> &Self::Target {
-        crate::Canvas::borrow_from_native(unsafe { &*self.canvas })
-    }
-}
-
-impl DerefMut for Canvas {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        crate::Canvas::borrow_from_native_mut(unsafe { &mut *self.canvas })
+        unsafe { crate::Canvas::borrow_from_native(self.canvas) }
     }
 }
 
 bitflags! {
-    #[derive(Default)]
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Flags : u32 {
-        const CONVERT_TEXT_TO_PATHS = sb::SkSVGCanvas_kConvertTextToPaths_Flag as _;
-        const NO_PRETTY_XML = sb::SkSVGCanvas_kNoPrettyXML_Flag as _;
+        const CONVERT_TEXT_TO_PATHS = sb::SkSVGCanvas_Flags_kConvertTextToPaths_Flag as _;
+        const NO_PRETTY_XML = sb::SkSVGCanvas_Flags_kNoPrettyXML_Flag as _;
+        const RELATIVE_PATH_ENCODING = sb::SkSVGCanvas_Flags_kRelativePathEncoding_Flag as _;
     }
 }
 
 impl fmt::Debug for Canvas {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Canvas")
-            .field(
-                "canvas",
-                crate::Canvas::borrow_from_native(unsafe { &*self.canvas }),
-            )
-            .field("stream", &self.stream)
+            .field("canvas", unsafe {
+                crate::Canvas::borrow_from_native(self.canvas)
+            })
+            .field("stream", unsafe { self.stream.as_ref() })
             .finish()
     }
 }
@@ -62,11 +60,12 @@ impl Canvas {
     pub fn new(bounds: impl AsRef<Rect>, flags: impl Into<Option<Flags>>) -> Canvas {
         let bounds = bounds.as_ref();
         let flags = flags.into().unwrap_or_default();
-        let mut stream = Box::pin(DynamicMemoryWStream::new());
+        let stream =
+            ptr::NonNull::new(Box::into_raw(Box::new(DynamicMemoryWStream::new()))).unwrap();
         let canvas = unsafe {
             sb::C_SkSVGCanvas_Make(
                 bounds.native(),
-                &mut stream.native_mut()._base,
+                &raw mut (*stream.as_ptr().cast::<SkDynamicMemoryWStream>())._base,
                 flags.bits(),
             )
         };
@@ -83,28 +82,34 @@ impl Canvas {
             sb::C_SkCanvas_delete(self.canvas);
         }
         self.canvas = ptr::null_mut();
-        self.stream.detach_as_data()
+        unsafe { (*self.stream.as_ptr()).detach_as_data() }
     }
 }
 
-#[test]
-fn test_svg() {
-    use crate::Paint;
+#[cfg(test)]
+mod tests {
+    use super::Canvas;
+    use crate::Rect;
 
-    let mut canvas = Canvas::new(&Rect::from_size((20, 20)), None);
-    let paint = Paint::default();
-    canvas.draw_circle((10, 10), 10.0, &paint);
-    let data = canvas.end();
-    let contents = String::from_utf8_lossy(data.as_bytes());
-    dbg!(&contents);
-    assert!(contents.contains(r#"<ellipse cx="10" cy="10" rx="10" ry="10"/>"#));
-    assert!(contents.contains(r#"</svg>"#));
-}
+    #[test]
+    fn test_svg() {
+        use crate::Paint;
 
-#[test]
-fn test_svg_without_ending() {
-    use crate::Paint;
-    let mut canvas = Canvas::new(&Rect::from_size((20, 20)), None);
-    let paint = Paint::default();
-    canvas.draw_circle((10, 10), 10.0, &paint);
+        let canvas = Canvas::new(Rect::from_size((20, 20)), None);
+        let paint = Paint::default();
+        canvas.draw_circle((10, 10), 10.0, &paint);
+        let data = canvas.end();
+        let contents = String::from_utf8_lossy(data.as_bytes());
+        dbg!(&contents);
+        assert!(contents.contains(r#"<ellipse cx="10" cy="10" rx="10" ry="10"/>"#));
+        assert!(contents.contains(r#"</svg>"#));
+    }
+
+    #[test]
+    fn test_svg_without_ending() {
+        use crate::Paint;
+        let canvas = Canvas::new(Rect::from_size((20, 20)), None);
+        let paint = Paint::default();
+        canvas.draw_circle((10, 10), 10.0, &paint);
+    }
 }

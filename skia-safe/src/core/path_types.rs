@@ -1,20 +1,15 @@
-use crate::prelude::*;
+//! Types used by [`crate::Path`]: fill type, direction, segment mask, and verb.
+
 use skia_bindings as sb;
-use skia_bindings::{SkPathVerb, SkPath_Verb};
 
-pub use skia_bindings::SkPathFillType as PathFillType;
-#[test]
-pub fn test_fill_type_naming() {
-    let _ = PathFillType::InverseEvenOdd;
-}
+pub type PathFillType = sb::SkPathFillType;
+variant_name!(PathFillType::InverseEvenOdd);
 
-pub use skia_bindings::SkPathDirection as PathDirection;
-#[test]
-fn test_direction_naming() {
-    let _ = PathDirection::CW;
-}
+pub type PathDirection = sb::SkPathDirection;
+variant_name!(PathDirection::CW);
 
 bitflags! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct PathSegmentMask: u32 {
         const LINE = sb::SkPathSegmentMask_kLine_SkPathSegmentMask as _;
         const QUAD = sb::SkPathSegmentMask_kQuad_SkPathSegmentMask as _;
@@ -23,14 +18,5 @@ bitflags! {
     }
 }
 
-pub use skia_bindings::SkPathVerb as PathVerb;
-#[test]
-fn test_path_verb_naming() {
-    let _ = PathVerb::Conic;
-}
-
-impl NativeTransmutable<SkPath_Verb> for SkPathVerb {}
-#[test]
-fn test_verb_layout() {
-    SkPathVerb::test_layout();
-}
+pub type PathVerb = sb::SkPathVerb;
+variant_name!(PathVerb::Conic);

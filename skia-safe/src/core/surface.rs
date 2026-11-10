@@ -1,31 +1,168 @@
-#[cfg(feature = "gpu")]
-use crate::gpu;
-use crate::{
-    prelude::*, Bitmap, Canvas, DeferredDisplayList, IPoint, IRect, ISize, IVector, Image,
-    ImageInfo, Paint, Pixmap, Point, SamplingOptions, SurfaceCharacterization, SurfaceProps,
-};
-use skia_bindings::{self as sb, SkRefCntBase, SkSurface};
+//! Describes a drawing destination: a [`Surface`] manages the pixels or GPU resources that a
+//! [`crate::Canvas`] draws into.
+
 use std::{fmt, ptr};
 
-pub use skia_bindings::SkSurface_ContentChangeMode as ContentChangeMode;
-#[test]
-fn test_surface_content_change_mode_naming() {
-    let _ = ContentChangeMode::Retain;
+use skia_bindings::{self as sb, SkRefCntBase, SkSurface};
+
+use crate::gpu;
+use crate::image::read_pixels_callback;
+use crate::prelude::*;
+use crate::{
+    Bitmap, Canvas, ColorSpace, IPoint, IRect, ISize, Image, ImageInfo, Paint, Pixmap, Point,
+    SamplingOptions, SurfaceProps, YUVColorSpace,
+};
+
+pub use crate::image::{AsyncReadResult, RescaleGamma, RescaleMode};
+
+pub mod surfaces {
+    //! Factory functions for creating [`crate::Surface`]s, e.g. raster, null, and GPU-backed
+    //! surfaces.
+    use skia_bindings::{self as sb};
+
+    use crate::prelude::*;
+    use crate::{ISize, ImageInfo, Surface, SurfaceProps};
+
+    pub use sb::SkSurfaces_BackendSurfaceAccess as BackendSurfaceAccess;
+    variant_name!(BackendSurfaceAccess::Present);
+
+    /// Returns [`Surface`] without backing pixels. Drawing to [`crate::Canvas`] returned from
+    /// [`Surface`] has no effect. Calling [`Surface::image_snapshot()`] on returned [`Surface`]
+    /// returns `None`.
+    ///
+    /// * `width` - one or greater
+    /// * `height` - one or greater
+    ///
+    /// Returns: [`Surface`] if width and height are positive; otherwise, `None`
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_MakeNull>
+    pub fn null(size: impl Into<ISize>) -> Option<Surface> {
+        let size = size.into();
+        Surface::from_ptr(unsafe { sb::C_SkSurfaces_Null(size.width, size.height) })
+    }
+
+    /// Allocates raster [`Surface`]. [`crate::Canvas`] returned by [`Surface`] draws directly into
+    /// pixels. Allocates and zeroes pixel memory. Pixel memory size is height times width times
+    /// four. Pixel memory is deleted when [`Surface`] is deleted.
+    ///
+    /// Internally, sets [`ImageInfo`] to width, height, native color type, and
+    /// [`crate::AlphaType::Premul`].
+    ///
+    /// [`Surface`] is returned if width and height are greater than zero.
+    ///
+    /// Use to create [`Surface`] that matches [`crate::PMColor`], the native pixel arrangement on
+    /// the platform. [`Surface`] drawn to output device skips converting its pixel format.
+    ///
+    /// * `width` - pixel column count; must be greater than zero
+    /// * `height` - pixel row count; must be greater than zero
+    /// * `surface_props` - LCD striping orientation and setting for device independent fonts; may
+    ///    be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    pub fn raster_n32_premul(size: impl Into<ISize>) -> Option<Surface> {
+        raster(&ImageInfo::new_n32_premul(size, None), None, None)
+    }
+
+    /// Allocates raster [`Surface`]. [`crate::Canvas`] returned by [`Surface`] draws directly into
+    /// pixels. Allocates and zeroes pixel memory. Pixel memory size is `image_info.height()` times
+    /// `row_bytes`, or times `image_info.min_row_bytes()` if `row_bytes` is zero. Pixel memory is
+    /// deleted when [`Surface`] is deleted.
+    ///
+    /// [`Surface`] is returned if all parameters are valid. Valid parameters include: info
+    /// dimensions are greater than zero; info contains [`crate::ColorType`] and
+    /// [`crate::AlphaType`] supported by raster surface; `row_bytes` is large enough to contain
+    /// info width pixels of [`crate::ColorType`], or is zero.
+    ///
+    /// If `row_bytes` is zero, a suitable value will be chosen internally.
+    ///
+    /// * `image_info` - width, height, [`crate::ColorType`], [`crate::AlphaType`],
+    ///                      [`crate::ColorSpace`], of raster surface; width and height must be
+    ///                      greater than zero
+    /// * `row_bytes` - interval from one [`Surface`] row to the next; may be zero
+    /// * `surface_props` - LCD striping orientation and setting for device independent fonts; may
+    ///   be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    pub fn raster(
+        image_info: &ImageInfo,
+        row_bytes: impl Into<Option<usize>>,
+        surface_props: Option<&SurfaceProps>,
+    ) -> Option<Surface> {
+        Surface::from_ptr(unsafe {
+            sb::C_SkSurfaces_Raster(
+                image_info.native(),
+                row_bytes.into().unwrap_or_default(),
+                surface_props.native_ptr_or_null(),
+            )
+        })
+    }
+
+    /// Allocates raster [`Surface`]. [`crate::Canvas`] returned by [`Surface`] draws directly into
+    /// pixels.
+    ///
+    /// [`Surface`] is returned if all parameters are valid. Valid parameters include: info
+    /// dimensions are greater than zero; info contains [`crate::ColorType`] and
+    /// [`crate::AlphaType`] supported by raster surface; pixels is not `None`; `row_bytes` is large
+    /// enough to contain info width pixels of [`crate::ColorType`].
+    ///
+    /// Pixel buffer size should be info height times computed `row_bytes`. Pixels are not
+    /// initialized. To access pixels after drawing, [`Surface::peek_pixels()`] or
+    /// [`Surface::read_pixels()`].
+    ///
+    /// * `image_info` - width, height, [`crate::ColorType`], [`crate::AlphaType`],
+    ///                      [`crate::ColorSpace`], of raster surface; width and height must be
+    ///                      greater than zero
+    /// * `pixels` - pointer to destination pixels buffer
+    /// * `row_bytes` - interval from one [`Surface`] row to the next
+    /// * `surface_props` - LCD striping orientation and setting for device independent fonts; may
+    ///                      be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    pub fn wrap_pixels<'pixels>(
+        image_info: &ImageInfo,
+        pixels: &'pixels mut [u8],
+        row_bytes: impl Into<Option<usize>>,
+        surface_props: Option<&SurfaceProps>,
+    ) -> Option<Borrows<'pixels, Surface>> {
+        let row_bytes = row_bytes
+            .into()
+            .unwrap_or_else(|| image_info.min_row_bytes());
+
+        if pixels.len() < image_info.compute_byte_size(row_bytes) {
+            return None;
+        };
+
+        Surface::from_ptr(unsafe {
+            sb::C_SkSurfaces_WrapPixels(
+                image_info.native(),
+                pixels.as_mut_ptr() as _,
+                row_bytes,
+                surface_props.native_ptr_or_null(),
+            )
+        })
+        .map(move |surface| surface.borrows(pixels))
+    }
+
+    // TODO: WrapPixels(&Pixmap)
+    // TODO: WrapPixelsReleaseProc()?
 }
+
+/// ContentChangeMode members are parameters to [`Surface::notify_content_will_change()`].
+pub use skia_bindings::SkSurface_ContentChangeMode as ContentChangeMode;
+variant_name!(ContentChangeMode::Retain);
 
 pub use skia_bindings::SkSurface_BackendHandleAccess as BackendHandleAccess;
-#[test]
-fn test_surface_backend_handle_access_naming() {
-    let _ = BackendHandleAccess::FlushWrite;
-}
+#[cfg(feature = "ganesh")]
+variant_name!(BackendHandleAccess::FlushWrite);
 
-pub use skia_bindings::SkSurface_BackendSurfaceAccess as BackendSurfaceAccess;
-#[test]
-fn test_surface_backend_surface_access_naming() {
-    let _ = BackendSurfaceAccess::Present;
-}
-
+/// [`Surface`] is responsible for managing the pixels that a canvas draws into. The pixels can be
+/// allocated either in CPU memory (a raster surface) or on the GPU (a `RenderTarget` surface).
+/// [`Surface`] takes care of allocating a [`Canvas`] that will draw into the surface. Call
+/// [`Surface::canvas()`] to use that canvas (but don't delete it, it is owned by the surface).
+/// [`Surface`] always has non-zero dimensions. If there is a request for a new surface, and either
+/// of the requested dimensions are zero, then `None` will be returned.
 pub type Surface = RCHandle<SkSurface>;
+require_type_equality!(sb::SkSurface_INHERITED, sb::SkRefCnt);
 
 impl NativeRefCountedBase for SkSurface {
     type Base = SkRefCntBase;
@@ -43,280 +180,184 @@ impl fmt::Debug for Surface {
 }
 
 impl Surface {
+    /// Allocates raster [`Surface`]. [`Canvas`] returned by [`Surface`] draws directly into pixels.
+    ///
+    /// [`Surface`] is returned if all parameters are valid.
+    /// Valid parameters include:
+    /// info dimensions are greater than zero;
+    /// info contains [`crate::ColorType`] and [`crate::AlphaType`] supported by raster surface;
+    /// pixels is not `None`;
+    /// `row_bytes` is large enough to contain info width pixels of [`crate::ColorType`].
+    ///
+    /// Pixel buffer size should be info height times computed `row_bytes`.
+    /// Pixels are not initialized.
+    /// To access pixels after drawing, [`Self::peek_pixels()`] or [`Self::read_pixels()`].
+    ///
+    /// * `image_info` - width, height, [`crate::ColorType`], [`crate::AlphaType`], [`crate::ColorSpace`],
+    ///                      of raster surface; width and height must be greater than zero
+    /// * `pixels` - pointer to destination pixels buffer
+    /// * `row_bytes` - interval from one [`Surface`] row to the next
+    /// * `surface_props` - LCD striping orientation and setting for device independent fonts;
+    ///                      may be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    #[deprecated(since = "0.64.0", note = "use surfaces::wrap_pixels()")]
     pub fn new_raster_direct<'pixels>(
         image_info: &ImageInfo,
         pixels: &'pixels mut [u8],
         row_bytes: impl Into<Option<usize>>,
         surface_props: Option<&SurfaceProps>,
     ) -> Option<Borrows<'pixels, Surface>> {
-        let row_bytes = row_bytes
-            .into()
-            .unwrap_or_else(|| image_info.min_row_bytes());
-
-        if pixels.len() < image_info.compute_byte_size(row_bytes) {
-            return None;
-        };
-
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeRasterDirect(
-                image_info.native(),
-                pixels.as_mut_ptr() as _,
-                row_bytes,
-                surface_props.native_ptr_or_null(),
-            )
-        })
-        .map(move |surface| surface.borrows(pixels))
+        surfaces::wrap_pixels(image_info, pixels, row_bytes, surface_props)
     }
 
-    // TODO: MakeRasterDirect(&Pixmap)
-    // TODO: MakeRasterDirectReleaseProc()?
-
+    /// Allocates raster [`Surface`]. [`Canvas`] returned by [`Surface`] draws directly into pixels.
+    /// Allocates and zeroes pixel memory. Pixel memory size is `image_info.height()` times
+    /// `row_bytes`, or times `image_info.min_row_bytes()` if `row_bytes` is zero.
+    /// Pixel memory is deleted when [`Surface`] is deleted.
+    ///
+    /// [`Surface`] is returned if all parameters are valid.
+    /// Valid parameters include:
+    /// info dimensions are greater than zero;
+    /// info contains [`crate::ColorType`] and [`crate::AlphaType`] supported by raster surface;
+    /// `row_bytes` is large enough to contain info width pixels of [`crate::ColorType`], or is zero.
+    ///
+    /// If `row_bytes` is zero, a suitable value will be chosen internally.
+    ///
+    /// * `image_info` - width, height, [`crate::ColorType`], [`crate::AlphaType`], [`crate::ColorSpace`],
+    ///                      of raster surface; width and height must be greater than zero
+    /// * `row_bytes` - interval from one [`Surface`] row to the next; may be zero
+    /// * `surface_props` - LCD striping orientation and setting for device independent fonts;
+    ///                      may be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    #[deprecated(since = "0.64.0", note = "use surfaces::raster()")]
     pub fn new_raster(
         image_info: &ImageInfo,
         row_bytes: impl Into<Option<usize>>,
         surface_props: Option<&SurfaceProps>,
     ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeRaster(
-                image_info.native(),
-                row_bytes.into().unwrap_or_default(),
-                surface_props.native_ptr_or_null(),
-            )
-        })
+        surfaces::raster(image_info, row_bytes, surface_props)
     }
 
+    /// Allocates raster [`Surface`]. [`Canvas`] returned by [`Surface`] draws directly into pixels.
+    /// Allocates and zeroes pixel memory. Pixel memory size is height times width times
+    /// four. Pixel memory is deleted when [`Surface`] is deleted.
+    ///
+    /// Internally, sets [`ImageInfo`] to width, height, native color type, and
+    /// [`crate::AlphaType::Premul`].
+    ///
+    /// [`Surface`] is returned if width and height are greater than zero.
+    ///
+    /// Use to create [`Surface`] that matches [`crate::PMColor`], the native pixel arrangement on
+    /// the platform. [`Surface`] drawn to output device skips converting its pixel format.
+    ///
+    /// * `width` - pixel column count; must be greater than zero
+    /// * `height` - pixel row count; must be greater than zero
+    /// * `surface_props` - LCD striping orientation and setting for device independent
+    ///                      fonts; may be `None`
+    ///
+    /// Returns: [`Surface`] if all parameters are valid; otherwise, `None`
+    #[deprecated(since = "0.64.0", note = "use surfaces::raster_n32_premul()")]
     pub fn new_raster_n32_premul(size: impl Into<ISize>) -> Option<Self> {
-        let size = size.into();
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeRasterN32Premul(size.width, size.height, ptr::null())
-        })
-    }
-}
-
-#[cfg(feature = "gpu")]
-impl Surface {
-    pub fn from_backend_texture(
-        context: &mut gpu::RecordingContext,
-        backend_texture: &gpu::BackendTexture,
-        origin: gpu::SurfaceOrigin,
-        sample_count: impl Into<Option<usize>>,
-        color_type: crate::ColorType,
-        color_space: impl Into<Option<crate::ColorSpace>>,
-        surface_props: Option<&SurfaceProps>,
-    ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeFromBackendTexture(
-                context.native_mut(),
-                backend_texture.native(),
-                origin,
-                sample_count.into().unwrap_or(0).try_into().unwrap(),
-                color_type.into_native(),
-                color_space.into().into_ptr_or_null(),
-                surface_props.native_ptr_or_null(),
-            )
-        })
-    }
-
-    pub fn from_backend_render_target(
-        context: &mut gpu::RecordingContext,
-        backend_render_target: &gpu::BackendRenderTarget,
-        origin: gpu::SurfaceOrigin,
-        color_type: crate::ColorType,
-        color_space: impl Into<Option<crate::ColorSpace>>,
-        surface_props: Option<&SurfaceProps>,
-    ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeFromBackendRenderTarget(
-                context.native_mut(),
-                backend_render_target.native(),
-                origin,
-                color_type.into_native(),
-                color_space.into().into_ptr_or_null(),
-                surface_props.native_ptr_or_null(),
-            )
-        })
-    }
-
-    #[allow(clippy::missing_safety_doc)]
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "metal")]
-    pub unsafe fn from_ca_metal_layer(
-        context: &mut gpu::RecordingContext,
-        layer: gpu::mtl::Handle,
-        origin: gpu::SurfaceOrigin,
-        sample_count: impl Into<Option<usize>>,
-        color_type: crate::ColorType,
-        color_space: impl Into<Option<crate::ColorSpace>>,
-        surface_props: Option<&SurfaceProps>,
-        drawable: *mut gpu::mtl::Handle,
-    ) -> Option<Self> {
-        Self::from_ptr(sb::C_SkSurface_MakeFromCAMetalLayer(
-            context.native_mut(),
-            layer,
-            origin,
-            sample_count.into().unwrap_or(0).try_into().unwrap(),
-            color_type.into_native(),
-            color_space.into().into_ptr_or_null(),
-            surface_props.native_ptr_or_null(),
-            drawable,
-        ))
-    }
-
-    #[cfg(feature = "metal")]
-    #[deprecated(since = "0.36.0", note = "use from_mtk_view()")]
-    pub fn from_ca_mtk_view(
-        context: &mut gpu::DirectContext,
-        mtk_view: gpu::mtl::Handle,
-        origin: gpu::SurfaceOrigin,
-        sample_count: impl Into<Option<usize>>,
-        color_type: crate::ColorType,
-        color_space: impl Into<Option<crate::ColorSpace>>,
-        surface_props: Option<&SurfaceProps>,
-    ) -> Option<Self> {
-        Self::from_mtk_view(
-            context,
-            mtk_view,
-            origin,
-            sample_count,
-            color_type,
-            color_space,
-            surface_props,
-        )
-    }
-
-    #[cfg(feature = "metal")]
-    pub fn from_mtk_view(
-        context: &mut gpu::RecordingContext,
-        mtk_view: gpu::mtl::Handle,
-        origin: gpu::SurfaceOrigin,
-        sample_count: impl Into<Option<usize>>,
-        color_type: crate::ColorType,
-        color_space: impl Into<Option<crate::ColorSpace>>,
-        surface_props: Option<&SurfaceProps>,
-    ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeFromMTKView(
-                context.native_mut(),
-                mtk_view,
-                origin,
-                sample_count.into().unwrap_or(0).try_into().unwrap(),
-                color_type.into_native(),
-                color_space.into().into_ptr_or_null(),
-                surface_props.native_ptr_or_null(),
-            )
-        })
-    }
-    pub fn new_render_target(
-        context: &mut gpu::RecordingContext,
-        budgeted: crate::Budgeted,
-        image_info: &ImageInfo,
-        sample_count: impl Into<Option<usize>>,
-        surface_origin: gpu::SurfaceOrigin,
-        surface_props: Option<&SurfaceProps>,
-        should_create_with_mips: impl Into<Option<bool>>,
-    ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeRenderTarget(
-                context.native_mut(),
-                budgeted.into_native(),
-                image_info.native(),
-                sample_count.into().unwrap_or(0).try_into().unwrap(),
-                surface_origin,
-                surface_props.native_ptr_or_null(),
-                should_create_with_mips.into().unwrap_or_default(),
-            )
-        })
-    }
-
-    pub fn new_render_target_with_characterization(
-        context: &mut gpu::RecordingContext,
-        characterization: &SurfaceCharacterization,
-        budgeted: crate::Budgeted,
-    ) -> Option<Self> {
-        Self::from_ptr(unsafe {
-            sb::C_SkSurface_MakeRenderTarget2(
-                context.native_mut(),
-                characterization.native(),
-                budgeted.into_native(),
-            )
-        })
+        surfaces::raster_n32_premul(size)
     }
 }
 
 impl Surface {
-    pub fn is_compatible(&self, characterization: &SurfaceCharacterization) -> bool {
-        unsafe { self.native().isCompatible(characterization.native()) }
-    }
-
+    /// Returns [`Surface`] without backing pixels. Drawing to [`Canvas`] returned from [`Surface`]
+    /// has no effect. Calling [`Self::image_snapshot()`] on returned [`Surface`] returns `None`.
+    ///
+    /// * `width` - one or greater
+    /// * `height` - one or greater
+    ///
+    /// Returns: [`Surface`] if width and height are positive; otherwise, `None`
+    ///
+    #[deprecated(since = "0.64.0", note = "use surfaces::null()")]
     pub fn new_null(size: impl Into<ISize>) -> Option<Self> {
-        let size = size.into();
-        Self::from_ptr(unsafe { sb::C_SkSurface_MakeNull(size.width, size.height) })
+        surfaces::null(size)
     }
 
+    /// Returns pixel count in each row; may be zero or greater.
+    ///
+    /// Returns: number of pixel columns
     pub fn width(&self) -> i32 {
         unsafe { sb::C_SkSurface_width(self.native()) }
     }
 
+    /// Returns pixel row count; may be zero or greater.
+    ///
+    /// Returns: number of pixel rows
+    ///
     pub fn height(&self) -> i32 {
         unsafe { sb::C_SkSurface_height(self.native()) }
     }
 
-    pub fn image_info(&mut self) -> ImageInfo {
+    /// Returns an [`ImageInfo`] describing the surface.
+    pub fn image_info(&self) -> ImageInfo {
         let mut info = ImageInfo::default();
-        unsafe { sb::C_SkSurface_imageInfo(self.native_mut(), info.native_mut()) };
+        unsafe { sb::C_SkSurface_imageInfo(self.native(), info.native_mut()) };
         info
     }
 
+    /// Returns unique value identifying the content of [`Surface`]. Returned value changes
+    /// each time the content changes. Content is changed by drawing, or by calling
+    /// [`Self::notify_content_will_change()`].
+    ///
+    /// Returns: unique content identifier
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_notifyContentWillChange>
     pub fn generation_id(&mut self) -> u32 {
         unsafe { self.native_mut().generationID() }
     }
 
+    /// Notifies that [`Surface`] contents will be changed by code outside of Skia.
+    /// Subsequent calls to [`Self::generation_id()`] return a different value.
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_notifyContentWillChange>
     pub fn notify_content_will_change(&mut self, mode: ContentChangeMode) -> &mut Self {
         unsafe { self.native_mut().notifyContentWillChange(mode) }
         self
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(not(feature = "ganesh"))]
 impl Surface {
-    pub fn recording_context(&mut self) -> Option<gpu::RecordingContext> {
-        gpu::RecordingContext::from_unshared_ptr(unsafe { self.native_mut().recordingContext() })
+    /// Returns the recording context being used by the [`Surface`].
+    pub fn recording_context(&self) -> Option<gpu::RecordingContext> {
+        None
     }
 
-    pub fn get_backend_texture(
-        &mut self,
-        handle_access: BackendHandleAccess,
-    ) -> Option<gpu::BackendTexture> {
-        unsafe {
-            let mut backend_texture = construct(|bt| sb::C_GrBackendTexture_Construct(bt));
-            sb::C_SkSurface_getBackendTexture(
-                self.native_mut(),
-                handle_access,
-                &mut backend_texture as _,
-            );
+    /// Returns the recording context being used by the [`Surface`].
+    pub fn direct_context(&self) -> Option<gpu::DirectContext> {
+        None
+    }
+}
 
-            gpu::BackendTexture::from_native_if_valid(backend_texture)
-        }
+#[cfg(feature = "ganesh")]
+impl Surface {
+    /// Returns the recording context being used by the [`Surface`].
+    ///
+    /// Returns: the recording context, if available; `None` otherwise
+    pub fn recording_context(&self) -> Option<gpu::RecordingContext> {
+        gpu::RecordingContext::from_unshared_ptr(unsafe { self.native().recordingContext() })
     }
 
-    pub fn get_backend_render_target(
-        &mut self,
-        handle_access: BackendHandleAccess,
-    ) -> Option<gpu::BackendRenderTarget> {
-        unsafe {
-            let mut backend_render_target =
-                construct(|rt| sb::C_GrBackendRenderTarget_Construct(rt));
-            sb::C_SkSurface_getBackendRenderTarget(
-                self.native_mut(),
-                handle_access,
-                &mut backend_render_target,
-            );
-
-            gpu::BackendRenderTarget::from_native_c_if_valid(backend_render_target)
-        }
+    /// rust-skia helper, not in Skia
+    pub fn direct_context(&self) -> Option<gpu::DirectContext> {
+        self.recording_context()
+            .and_then(|mut ctx| ctx.as_direct_context())
     }
 
     // TODO: support variant with TextureReleaseProc and ReleaseContext
+
+    /// If the surface was made via [`crate::gpu::ganesh::surface_ganesh::wrap_backend_texture()`] then it's backing texture may be
+    /// substituted with a different texture. The contents of the previous backing texture are
+    /// copied into the new texture. [`Canvas`] state is preserved. The original sample count is
+    /// used. The [`gpu::BackendFormat`] and dimensions of replacement texture must match that of
+    /// the original.
+    ///
+    /// * `backend_texture` - the new backing texture for the surface
     pub fn replace_backend_texture(
         &mut self,
         backend_texture: &gpu::BackendTexture,
@@ -325,6 +366,14 @@ impl Surface {
         self.replace_backend_texture_with_mode(backend_texture, origin, ContentChangeMode::Retain)
     }
 
+    /// If the surface was made via [`crate::gpu::ganesh::surface_ganesh::wrap_backend_texture()`] then it's backing texture may be
+    /// substituted with a different texture. The contents of the previous backing texture are
+    /// copied into the new texture. [`Canvas`] state is preserved. The original sample count is
+    /// used. The [`gpu::BackendFormat`] and dimensions of replacement texture must match that of
+    /// the original.
+    ///
+    /// * `backend_texture` - the new backing texture for the surface
+    /// * `mode` - Retain or discard current Content
     pub fn replace_backend_texture_with_mode(
         &mut self,
         backend_texture: &gpu::BackendTexture,
@@ -332,35 +381,67 @@ impl Surface {
         mode: impl Into<Option<ContentChangeMode>>,
     ) -> bool {
         unsafe {
-            self.native_mut().replaceBackendTexture(
+            sb::C_SkSurface_replaceBackendTexture(
+                self.native_mut(),
                 backend_texture.native(),
                 origin,
                 mode.into().unwrap_or(ContentChangeMode::Retain),
-                None,
-                ptr::null_mut(),
             )
         }
     }
 }
 
 impl Surface {
-    pub fn canvas(&mut self) -> &mut Canvas {
-        let canvas_ref = unsafe { &mut *self.native_mut().getCanvas() };
-        Canvas::borrow_from_native_mut(canvas_ref)
+    /// Returns [`Canvas`] that draws into [`Surface`]. Subsequent calls return the same [`Canvas`].
+    /// [`Canvas`] returned is managed and owned by [`Surface`], and is deleted when [`Surface`]
+    /// is deleted.
+    ///
+    /// Returns: drawing [`Canvas`] for [`Surface`]
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_getCanvas>
+    pub fn canvas(&mut self) -> &Canvas {
+        unsafe { Canvas::borrow_from_native(self.native_mut().getCanvas()) }
     }
+
+    // TODO: capabilities()
 
     // TODO: why is self mutable here?
-    pub fn new_surface(&mut self, info: &ImageInfo) -> Option<Surface> {
-        Surface::from_ptr(unsafe { sb::C_SkSurface_makeSurface(self.native_mut(), info.native()) })
+
+    /// Returns a compatible [`Surface`], or `None`. Returned [`Surface`] contains
+    /// the same raster, GPU, or null properties as the original. Returned [`Surface`]
+    /// does not share the same pixels.
+    ///
+    /// Returns `None` if `image_info` width or height are zero, or if `image_info`
+    /// is incompatible with [`Surface`].
+    ///
+    /// * `image_info` - width, height, [`crate::ColorType`], [`crate::AlphaType`], [`crate::ColorSpace`],
+    ///                   of [`Surface`]; width and height must be greater than zero
+    ///
+    /// Returns: compatible [`Surface`] or `None`
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_makeSurface>
+    pub fn new_surface(&mut self, image_info: &ImageInfo) -> Option<Self> {
+        Self::from_ptr(unsafe {
+            sb::C_SkSurface_makeSurface(self.native_mut(), image_info.native())
+        })
     }
 
-    pub fn new_surface_with_dimensions(&mut self, dim: impl Into<ISize>) -> Option<Surface> {
+    /// Calls [`Self::new_surface()`] with the same [`ImageInfo`] as this surface, but with the
+    /// specified width and height.
+    pub fn new_surface_with_dimensions(&mut self, dim: impl Into<ISize>) -> Option<Self> {
         let dim = dim.into();
-        Surface::from_ptr(unsafe {
+        Self::from_ptr(unsafe {
             sb::C_SkSurface_makeSurface2(self.native_mut(), dim.width, dim.height)
         })
     }
 
+    /// Returns [`Image`] capturing [`Surface`] contents. Subsequent drawing to [`Surface`] contents
+    /// are not captured. [`Image`] allocation is accounted for if [`Surface`] was created with
+    /// [`gpu::Budgeted::Yes`].
+    ///
+    /// Returns: [`Image`] initialized with [`Surface`] contents
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_makeImageSnapshot>
     pub fn image_snapshot(&mut self) -> Image {
         Image::from_ptr(unsafe {
             sb::C_SkSurface_makeImageSnapshot(self.native_mut(), ptr::null())
@@ -368,16 +449,53 @@ impl Surface {
         .unwrap()
     }
 
+    /// Returns an [`Image`] capturing the current [`Surface`] contents. However, the contents of the
+    /// [`Image`] are only valid as long as no other writes to the [`Surface`] occur. If writes to the
+    /// original [`Surface`] happen then contents of the [`Image`] are undefined. However, continued use
+    /// of the [`Image`] should not cause crashes or similar fatal behavior.
+    ///
+    /// This API is useful for cases where the client either immediately destroys the [`Surface`]
+    /// after the [`Image`] is created or knows they will destroy the [`Image`] before writing to the
+    /// [`Surface`] again.
+    ///
+    /// This API can be more performant than [`Self::image_snapshot()`] as it never does an internal copy
+    /// of the data assuming the user frees either the [`Image`] or [`Surface`] as described above.
+    pub fn make_temporary_image(&mut self) -> Option<Image> {
+        Image::from_ptr(unsafe { sb::C_SkSurface_makeTemporaryImage(self.native_mut()) })
+    }
+
     // TODO: combine this function with image_snapshot and make bounds optional()?
+
+    /// Like the no-parameter version, this returns an image of the current surface contents.
+    /// This variant takes a rectangle specifying the subset of the surface that is of interest.
+    /// These bounds will be sanitized before being used.
+    /// - If bounds extends beyond the surface, it will be trimmed to just the intersection of
+    ///   it and the surface.
+    /// - If bounds does not intersect the surface, then this returns `None`.
+    /// - If bounds == the surface, then this is the same as calling the no-parameter variant.
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_makeImageSnapshot_2>
     pub fn image_snapshot_with_bounds(&mut self, bounds: impl AsRef<IRect>) -> Option<Image> {
         Image::from_ptr(unsafe {
             sb::C_SkSurface_makeImageSnapshot(self.native_mut(), bounds.as_ref().native())
         })
     }
 
+    /// Draws [`Surface`] contents to canvas, with its top-left corner at `(offset.x, offset.y)`.
+    ///
+    /// If [`Paint`] paint is not `None`, apply [`crate::ColorFilter`], alpha, [`crate::ImageFilter`], and [`crate::BlendMode`].
+    ///
+    /// * `canvas` - [`Canvas`] drawn into
+    /// * `offset.x` - horizontal offset in [`Canvas`]
+    /// * `offset.y` - vertical offset in [`Canvas`]
+    /// * `sampling` - what technique to use when sampling the surface pixels
+    /// * `paint` - [`Paint`] containing [`crate::BlendMode`], [`crate::ColorFilter`], [`crate::ImageFilter`],
+    ///                and so on; or `None`
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_draw>
     pub fn draw(
         &mut self,
-        canvas: &mut Canvas,
+        canvas: &Canvas,
         offset: impl Into<Point>,
         sampling: impl Into<SamplingOptions>,
         paint: Option<&Paint>,
@@ -386,7 +504,7 @@ impl Surface {
         let sampling = sampling.into();
         unsafe {
             self.native_mut().draw(
-                canvas.native_mut(),
+                canvas.native_ptr(),
                 offset.x,
                 offset.y,
                 sampling.native(),
@@ -395,18 +513,88 @@ impl Surface {
         }
     }
 
-    pub fn peek_pixels(&mut self) -> Option<Borrows<Pixmap>> {
+    /// Copies [`Surface`] pixel address, row bytes, and [`ImageInfo`] to [`Pixmap`], if address
+    /// is available, and returns `Some(Pixmap)`. If pixel address is not available, return `None`
+    /// and leave [`Pixmap`] unchanged.
+    ///
+    /// pixmap contents become invalid on any future change to [`Surface`].
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_peekPixels>
+    pub fn peek_pixels(&mut self) -> Option<Pixmap> {
         let mut pm = Pixmap::default();
-        unsafe { self.native_mut().peekPixels(pm.native_mut()) }
-            .if_true_then_some(move || pm.borrows(self))
+        unsafe { self.native_mut().peekPixels(pm.native_mut()) }.then_some(pm)
     }
 
     // TODO: why is self mut?
+
+    /// Copies [`crate::Rect`] of pixels to dst.
+    ///
+    /// Source [`crate::Rect`] corners are (`src.x`, `src.y`) and [`Surface`] `(width(), height())`.
+    /// Destination [`crate::Rect`] corners are `(0, 0)` and `(dst.width(), dst.
+    /// height())`.
+    /// Copies each readable pixel intersecting both rectangles, without scaling,
+    /// converting to [`Pixmap::color_type()`] and [`Pixmap::alpha_type()`] if required.
+    ///
+    /// Pixels are readable when [`Surface`] is raster, or backed by a Ganesh GPU backend. Graphite
+    /// has deprecated this API in favor of the equivalent asynchronous API on
+    /// `skgpu::graphite::Context` (with an optional explicit synchonization).
+    ///
+    /// The destination pixel storage must be allocated by the caller.
+    ///
+    /// Pixel values are converted only if [`crate::ColorType`] and [`crate::AlphaType`]
+    /// do not match. Only pixels within both source and destination rectangles
+    /// are copied. dst contents outside [`crate::Rect`] intersection are unchanged.
+    ///
+    /// Pass negative values for `src.x` or `src.y` to offset pixels across or down destination.
+    ///
+    /// Does not copy, and returns `false` if:
+    /// - Source and destination rectangles do not intersect.
+    /// - [`Pixmap`] pixels could not be allocated.
+    /// - `dst.row_bytes()` is too small to contain one row of pixels.
+    ///
+    /// * `dst` - storage for pixels copied from [`Surface`]
+    /// * `src_x` - offset into readable pixels on x-axis; may be negative
+    /// * `src_y` - offset into readable pixels on y-axis; may be negative
+    ///
+    /// Returns: `true` if pixels were copied
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_readPixels>
     pub fn read_pixels_to_pixmap(&mut self, dst: &Pixmap, src: impl Into<IPoint>) -> bool {
         let src = src.into();
         unsafe { self.native_mut().readPixels(dst.native(), src.x, src.y) }
     }
 
+    /// Copies [`crate::Rect`] of pixels from [`Canvas`] into `dst_pixels`.
+    ///
+    /// Source [`crate::Rect`] corners are (`src.x`, `src.y`) and [`Surface`] (width(), height()).
+    /// Destination [`crate::Rect`] corners are (0, 0) and (`dst_info`.width(), `dst_info`.height()).
+    /// Copies each readable pixel intersecting both rectangles, without scaling,
+    /// converting to `dst_info_color_type()` and `dst_info_alpha_type()` if required.
+    ///
+    /// Pixels are readable when [`Surface`] is raster, or backed by a Ganesh GPU backend. Graphite
+    /// has deprecated this API in favor of the equivalent asynchronous API on
+    /// `skgpu::graphite::Context` (with an optional explicit synchonization).
+    ///
+    /// The destination pixel storage must be allocated by the caller.
+    ///
+    /// Pixel values are converted only if [`crate::ColorType`] and [`crate::AlphaType`]
+    /// do not match. Only pixels within both source and destination rectangles
+    /// are copied. `dst_pixels` contents outside [`crate::Rect`] intersection are unchanged.
+    ///
+    /// Pass negative values for `src.x` or `src.y` to offset pixels across or down destination.
+    ///
+    /// Does not copy, and returns `false` if:
+    /// - Source and destination rectangles do not intersect.
+    /// - [`Surface`] pixels could not be converted to `dst_info.color_type()` or `dst_info.alpha_type()`.
+    /// - `dst_row_bytes` is too small to contain one row of pixels.
+    ///
+    /// * `dst_info` - width, height, [`crate::ColorType`], and [`crate::AlphaType`] of `dst_pixels`
+    /// * `dst_pixels` - storage for pixels; `dst_info.height()` times `dst_row_bytes`, or larger
+    /// * `dst_row_bytes` - size of one destination row; `dst_info.width()` times pixel size, or larger
+    /// * `src.x` - offset into readable pixels on x-axis; may be negative
+    /// * `src.y` - offset into readable pixels on y-axis; may be negative
+    ///
+    /// Returns: `true` if pixels were copied
     pub fn read_pixels(
         &mut self,
         dst_info: &ImageInfo,
@@ -430,21 +618,223 @@ impl Surface {
     }
 
     // TODO: why is self mut?
-    // TODO: why is Bitmap non-mutable.
+    // TODO: why is Bitmap immutable?
+
+    /// Copies [`crate::Rect`] of pixels from [`Surface`] into bitmap.
+    ///
+    /// Source [`crate::Rect`] corners are (`src.x`, `src.y`) and [`Surface`] (width(), height()).
+    /// Destination [`crate::Rect`] corners are `(0, 0)` and `(bitmap.width(), bitmap.height())`.
+    /// Copies each readable pixel intersecting both rectangles, without scaling,
+    /// converting to `bitmap.color_type()` and `bitmap.alpha_type()` if required.
+    ///
+    /// Pixels are readable when [`Surface`] is raster, or backed by a Ganesh GPU backend. Graphite
+    /// has deprecated this API in favor of the equivalent asynchronous API on
+    /// `skgpu::graphite::Context` (with an optional explicit synchonization).
+    ///
+    /// The destination pixel storage must be allocated by the caller.
+    ///
+    /// Pixel values are converted only if [`crate::ColorType`] and [`crate::AlphaType`]
+    /// do not match. Only pixels within both source and destination rectangles
+    /// are copied. dst contents outside [`crate::Rect`] intersection are unchanged.
+    ///
+    /// Pass negative values for `src.x` or `src.y` to offset pixels across or down destination.
+    ///
+    /// Does not copy, and returns `false` if:
+    /// - Source and destination rectangles do not intersect.
+    /// - [`Surface`] pixels could not be converted to `dst.color_type()` or `dst.alpha_type()`.
+    /// - dst pixels could not be allocated.
+    /// - `dst.row_bytes()` is too small to contain one row of pixels.
+    ///
+    /// * `dst` - storage for pixels copied from [`Surface`]
+    /// * `src.x` - offset into readable pixels on x-axis; may be negative
+    /// * `src.y` - offset into readable pixels on y-axis; may be negative
+    ///
+    /// Returns: `true` if pixels were copied
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_readPixels_3>
     pub fn read_pixels_to_bitmap(&mut self, bitmap: &Bitmap, src: impl Into<IPoint>) -> bool {
         let src = src.into();
         unsafe { self.native_mut().readPixels2(bitmap.native(), src.x, src.y) }
     }
 
-    // TODO: AsyncReadResult, RescaleGamma (m79, m86)
-    // TODO: wrap asyncRescaleAndReadPixels (m76, m79, m89)
-    // TODO: wrap asyncRescaleAndReadPixelsYUV420 (m77, m79, m89)
+    /// Makes surface pixel data available to caller, possibly asynchronously. It can also rescale
+    /// the surface pixels.
+    ///
+    /// Currently asynchronous reads are only supported in the Ganesh GPU backend and only when the
+    /// underlying 3D API supports transfer buffers and CPU/GPU synchronization primitives. In all
+    /// other cases this operates synchronously.
+    ///
+    /// For the Graphite backend this API has been deprecated in favor of the equivalent API
+    /// on `skgpu::graphite::Context`.
+    ///
+    /// Data is read from the source sub-rectangle, is optionally converted to a linear gamma, is
+    /// rescaled to the size indicated by `info`, is then converted to the color space, color type,
+    /// and alpha type of `info`. A `src_rect` that is not contained by the bounds of the surface
+    /// causes failure.
+    ///
+    /// When the pixel data is ready the caller's `callback` is called with a
+    /// [`AsyncReadResult`] containing pixel data in the requested color type, alpha type, and color
+    /// space. The [`AsyncReadResult`] will have [`AsyncReadResult::count()`] == 1. Upon failure the
+    /// callback is called with `None` for [`AsyncReadResult`]. For a GPU surface this flushes work
+    /// but a submit must occur to guarantee a finite time before the callback is called.
+    ///
+    /// The data is valid for the lifetime of [`AsyncReadResult`] with the exception that if the
+    /// [`Surface`] is GPU-backed the data is immediately invalidated if the context is abandoned
+    /// or destroyed.
+    ///
+    /// `callback` is called exactly once: before this function returns, from
+    /// [`crate::gpu::DirectContext::check_async_work_completion()`], or when the context is
+    /// dropped. A panic in `callback` aborts the process.
+    ///
+    /// - `info` info of the requested pixels
+    /// - `src_rect` subrectangle of surface to read
+    /// - `rescale_gamma` controls whether rescaling is done in the surface's gamma or whether
+    ///   the source data is transformed to a linear gamma before rescaling.
+    /// - `rescale_mode` controls the technique of the rescaling
+    /// - `callback` function to call with result of the read
+    pub fn async_rescale_and_read_pixels(
+        &mut self,
+        info: &ImageInfo,
+        src_rect: impl AsRef<IRect>,
+        rescale_gamma: RescaleGamma,
+        rescale_mode: RescaleMode,
+        callback: impl FnOnce(Option<AsyncReadResult>) + 'static,
+    ) {
+        let (callback, context) = read_pixels_callback(callback);
+        unsafe {
+            sb::C_SkSurface_asyncRescaleAndReadPixels(
+                self.native_mut(),
+                info.native(),
+                src_rect.as_ref().native(),
+                rescale_gamma,
+                rescale_mode,
+                callback,
+                context,
+            )
+        }
+    }
 
+    /// Similar to [`Self::async_rescale_and_read_pixels()`] but performs an additional conversion
+    /// to YUV. The RGB->YUV conversion is controlled by `yuv_color_space`. The YUV data is returned
+    /// as three planes ordered y, u, v. The u and v planes are half the width and height of the
+    /// resized rectangle. The y, u, and v values are single bytes. Currently this fails if
+    /// `dst_size` width and height are not even. A `src_rect` that is not contained by the bounds
+    /// of the surface causes failure.
+    ///
+    /// When the pixel data is ready the caller's `callback` is called with a
+    /// [`AsyncReadResult`] containing the planar data. The [`AsyncReadResult`] will have
+    /// [`AsyncReadResult::count()`] == 3. Upon failure the callback is called with `None` for
+    /// [`AsyncReadResult`]. For a GPU surface this flushes work but a submit must occur to
+    /// guarantee a finite time before the callback is called.
+    ///
+    /// The data is valid for the lifetime of [`AsyncReadResult`] with the exception that if the
+    /// [`Surface`] is GPU-backed the data is immediately invalidated if the context is abandoned
+    /// or destroyed.
+    ///
+    /// `callback` is called exactly once: before this function returns, from
+    /// [`crate::gpu::DirectContext::check_async_work_completion()`], or when the context is
+    /// dropped. A panic in `callback` aborts the process. Raster and Graphite surfaces do not
+    /// support this read and call back with `None`.
+    ///
+    /// - `yuv_color_space` The transformation from RGB to YUV. Applied to the resized image
+    ///   after it is converted to `dst_color_space`.
+    /// - `dst_color_space` The color space to convert the resized image to, after rescaling.
+    /// - `src_rect` The portion of the surface to rescale and convert to YUV planes.
+    /// - `dst_size` The size to rescale `src_rect` to
+    /// - `rescale_gamma` controls whether rescaling is done in the surface's gamma or whether
+    ///   the source data is transformed to a linear gamma before rescaling.
+    /// - `rescale_mode` controls the sampling technique of the rescaling
+    /// - `callback` function to call with the planar read result
+    #[allow(clippy::too_many_arguments)]
+    pub fn async_rescale_and_read_pixels_yuv420(
+        &mut self,
+        yuv_color_space: YUVColorSpace,
+        dst_color_space: impl Into<Option<ColorSpace>>,
+        src_rect: impl AsRef<IRect>,
+        dst_size: impl Into<ISize>,
+        rescale_gamma: RescaleGamma,
+        rescale_mode: RescaleMode,
+        callback: impl FnOnce(Option<AsyncReadResult>) + 'static,
+    ) {
+        let (callback, context) = read_pixels_callback(callback);
+        unsafe {
+            sb::C_SkSurface_asyncRescaleAndReadPixelsYUV420(
+                self.native_mut(),
+                yuv_color_space,
+                dst_color_space.into().into_ptr_or_null(),
+                src_rect.as_ref().native(),
+                dst_size.into().native(),
+                rescale_gamma,
+                rescale_mode,
+                callback,
+                context,
+            )
+        }
+    }
+
+    /// Identical to [`Self::async_rescale_and_read_pixels_yuv420()`] but a fourth plane is returned
+    /// in the [`AsyncReadResult`] passed to `callback`. The fourth plane contains the alpha chanel
+    /// at the same full resolution as the Y plane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn async_rescale_and_read_pixels_yuva420(
+        &mut self,
+        yuv_color_space: YUVColorSpace,
+        dst_color_space: impl Into<Option<ColorSpace>>,
+        src_rect: impl AsRef<IRect>,
+        dst_size: impl Into<ISize>,
+        rescale_gamma: RescaleGamma,
+        rescale_mode: RescaleMode,
+        callback: impl FnOnce(Option<AsyncReadResult>) + 'static,
+    ) {
+        let (callback, context) = read_pixels_callback(callback);
+        unsafe {
+            sb::C_SkSurface_asyncRescaleAndReadPixelsYUVA420(
+                self.native_mut(),
+                yuv_color_space,
+                dst_color_space.into().into_ptr_or_null(),
+                src_rect.as_ref().native(),
+                dst_size.into().native(),
+                rescale_gamma,
+                rescale_mode,
+                callback,
+                context,
+            )
+        }
+    }
+
+    /// Copies [`crate::Rect`] of pixels from the src [`Pixmap`] to the [`Surface`].
+    ///
+    /// Source [`crate::Rect`] corners are `(0, 0)` and `(src.width(), src.height())`.
+    /// Destination [`crate::Rect`] corners are `(`dst.x`, `dst.y`)` and
+    /// (`dst.x` + Surface width(), `dst.y` + Surface height()).
+    ///
+    /// Copies each readable pixel intersecting both rectangles, without scaling,
+    /// converting to [`Surface`] `color_type()` and [`Surface`] `alpha_type()` if required.
+    ///
+    /// * `src` - storage for pixels to copy to [`Surface`]
+    /// * `dst.x` - x-axis position relative to [`Surface`] to begin copy; may be negative
+    /// * `dst.y` - y-axis position relative to [`Surface`] to begin copy; may be negative
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_writePixels>
     pub fn write_pixels_from_pixmap(&mut self, src: &Pixmap, dst: impl Into<IPoint>) {
         let dst = dst.into();
         unsafe { self.native_mut().writePixels(src.native(), dst.x, dst.y) }
     }
 
+    /// Copies [`crate::Rect`] of pixels from the src [`Bitmap`] to the [`Surface`].
+    ///
+    /// Source [`crate::Rect`] corners are `(0, 0)` and `(src.width(), src.height())`.
+    /// Destination [`crate::Rect`] corners are `(`dst.x`, `dst.y`)` and
+    /// `(`dst.x` + Surface width(), `dst.y` + Surface height())`.
+    ///
+    /// Copies each readable pixel intersecting both rectangles, without scaling,
+    /// converting to [`Surface`] `color_type()` and [`Surface`] `alpha_type()` if required.
+    ///
+    /// * `src` - storage for pixels to copy to [`Surface`]
+    /// * `dst.x` - x-axis position relative to [`Surface`] to begin copy; may be negative
+    /// * `dst.y` - y-axis position relative to [`Surface`] to begin copy; may be negative
+    ///
+    /// Example (C++): <https://fiddle.skia.org/c/@Surface_writePixels_2>
     pub fn write_pixels_from_bitmap(&mut self, bitmap: &Bitmap, dst: impl Into<IPoint>) {
         let dst = dst.into();
         unsafe {
@@ -453,128 +843,155 @@ impl Surface {
         }
     }
 
+    /// Returns [`SurfaceProps`] for surface.
+    ///
+    /// Returns: LCD striping orientation and setting for device independent fonts
     pub fn props(&self) -> &SurfaceProps {
         SurfaceProps::from_native_ref(unsafe { &*sb::C_SkSurface_props(self.native()) })
     }
 
-    pub fn flush_and_submit(&mut self) {
-        unsafe {
-            self.native_mut().flushAndSubmit(false);
-        }
-    }
-
-    pub fn flush_submit_and_sync_cpu(&mut self) {
-        unsafe {
-            self.native_mut().flushAndSubmit(true);
-        }
-    }
-
-    // After deprecated since 0.30.0 (m85), the default flush() behavior changed in m86.
-    // For more information, take a look at the documentation in Skia's SkSurface.h
-    #[cfg(feature = "gpu")]
-    pub fn flush(&mut self) {
-        let info = gpu::FlushInfo::default();
-        self.flush_with_mutable_state(&info, None);
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn flush_with_access_info(
+    /// Inserts a list of GPU semaphores that the current GPU-backed API
+    /// must wait on before executing any more commands on the GPU for
+    /// this surface. If this call returns `false`, then the GPU back-end
+    /// will not wait on any passed-in semaphores, and the client will
+    /// still own the semaphores, regardless of the value of
+    /// `delete_semaphores_after_wait`.
+    ///
+    /// If `delete_semaphores_after_wait` is `false` then Skia will not
+    /// delete the semaphores. In this case it is the client's
+    /// responsibility to not destroy or attempt to reuse the semaphores
+    /// until it knows that Skia has finished waiting on them. This can
+    /// be done by using `finished_proc`s on flush calls.
+    ///
+    /// Returns: `true` if the GPU is waiting on the semaphores
+    #[cfg(feature = "ganesh")]
+    pub fn wait(
         &mut self,
-        access: BackendSurfaceAccess,
-        info: &gpu::FlushInfo,
-    ) -> gpu::SemaphoresSubmitted {
-        unsafe { self.native_mut().flush(access, info.native()) }
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn flush_with_mutable_state<'a>(
-        &mut self,
-        info: &gpu::FlushInfo,
-        new_state: impl Into<Option<&'a gpu::BackendSurfaceMutableState>>,
-    ) -> gpu::SemaphoresSubmitted {
-        unsafe {
-            self.native_mut()
-                .flush1(info.native(), new_state.into().native_ptr_or_null())
-        }
-    }
-
-    // TODO: wait()
-
-    pub fn characterize(&self) -> Option<SurfaceCharacterization> {
-        let mut sc = SurfaceCharacterization::default();
-        unsafe { self.native().characterize(sc.native_mut()) }.if_true_some(sc)
-    }
-
-    pub fn draw_display_list(
-        &mut self,
-        deferred_display_list: impl Into<DeferredDisplayList>,
+        wait_semaphores: &[crate::gpu::BackendSemaphore],
+        delete_semaphores_after_wait: impl Into<Option<bool>>,
     ) -> bool {
-        self.draw_display_list_with_offset(deferred_display_list, IVector::default())
-    }
-
-    pub fn draw_display_list_with_offset(
-        &mut self,
-        deferred_display_list: impl Into<DeferredDisplayList>,
-        offset: impl Into<IVector>,
-    ) -> bool {
-        let offset = offset.into();
+        let delete_after_wait = delete_semaphores_after_wait.into().unwrap_or(true);
         unsafe {
-            sb::C_SkSurface_draw(
+            sb::SkSurface_wait(
                 self.native_mut(),
-                deferred_display_list.into().into_ptr() as *const _,
-                offset.x,
-                offset.y,
+                wait_semaphores
+                    .len()
+                    .try_into()
+                    .expect("wait_semaphores length exceeds c_int"),
+                wait_semaphores.native().as_ptr(),
+                delete_after_wait,
             )
         }
     }
 }
 
-#[test]
-fn create() {
-    assert!(Surface::new_raster_n32_premul((0, 0)).is_none());
-    let surface = Surface::new_raster_n32_premul((1, 1)).unwrap();
-    assert_eq!(1, surface.native().ref_counted_base()._ref_cnt())
-}
+pub use surfaces::BackendSurfaceAccess;
 
-#[test]
-fn test_raster_direct() {
-    let image_info = ImageInfo::new(
-        (20, 20),
-        crate::ColorType::RGBA8888,
-        crate::AlphaType::Unpremul,
-        None,
-    );
-    let min_row_bytes = image_info.min_row_bytes();
-    let mut pixels = vec![0u8; image_info.compute_byte_size(min_row_bytes)];
-    let mut surface = Surface::new_raster_direct(
-        &image_info,
-        pixels.as_mut_slice(),
-        Some(min_row_bytes),
-        None,
-    )
-    .unwrap();
-    let paint = Paint::default();
-    surface.canvas().draw_circle((10, 10), 10.0, &paint);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn test_drawing_owned_as_exclusive_ref_ergonomics() {
-    let mut surface = Surface::new_raster_n32_premul((16, 16)).unwrap();
-
-    // option1:
-    // - An &mut canvas can be drawn to.
-    {
-        let mut canvas = Canvas::new(ISize::new(16, 16), None).unwrap();
-        surface.draw(&mut canvas, (5.0, 5.0), SamplingOptions::default(), None);
-        surface.draw(&mut canvas, (10.0, 10.0), SamplingOptions::default(), None);
+    #[test]
+    fn create() {
+        assert!(surfaces::raster_n32_premul((0, 0)).is_none());
+        let surface = surfaces::raster_n32_premul((1, 1)).unwrap();
+        assert_eq!(1, surface.native().ref_counted_base()._ref_cnt())
     }
 
-    // option2:
-    // - A canvas from another surface can be drawn to.
-    {
-        let mut surface2 = Surface::new_raster_n32_premul((16, 16)).unwrap();
-        let canvas = surface2.canvas();
-        surface.draw(canvas, (5.0, 5.0), SamplingOptions::default(), None);
-        surface.draw(canvas, (10.0, 10.0), SamplingOptions::default(), None);
+    #[test]
+    fn test_raster_direct() {
+        let image_info = ImageInfo::new(
+            (20, 20),
+            crate::ColorType::RGBA8888,
+            crate::AlphaType::Unpremul,
+            None,
+        );
+        let min_row_bytes = image_info.min_row_bytes();
+        let mut pixels = vec![0u8; image_info.compute_byte_size(min_row_bytes)];
+        let mut surface = surfaces::wrap_pixels(
+            &image_info,
+            pixels.as_mut_slice(),
+            Some(min_row_bytes),
+            None,
+        )
+        .unwrap();
+        let paint = Paint::default();
+        surface.canvas().draw_circle((10, 10), 10.0, &paint);
+    }
+
+    #[test]
+    fn async_rescale_and_read_pixels_hands_the_result_to_the_callback() {
+        use crate::{AlphaType, Color, ColorType};
+        use std::{cell::RefCell, rc::Rc};
+
+        let mut surface = surfaces::raster_n32_premul((4, 4)).unwrap();
+        surface.canvas().clear(Color::RED);
+        let info = ImageInfo::new((2, 2), ColorType::RGBA8888, AlphaType::Premul, None);
+        let read = Rc::new(RefCell::new(None));
+
+        surface.async_rescale_and_read_pixels(
+            &info,
+            IRect::from_wh(4, 4),
+            RescaleGamma::Src,
+            RescaleMode::Nearest,
+            {
+                let read = read.clone();
+                move |result| {
+                    *read.borrow_mut() = result.map(|result| {
+                        let pixel = unsafe { *(result.data(0) as *const [u8; 4]) };
+                        (result.count(), pixel)
+                    })
+                }
+            },
+        );
+
+        assert_eq!(*read.borrow(), Some((1, [255, 0, 0, 255])));
+        assert_eq!(Rc::strong_count(&read), 1);
+    }
+
+    #[test]
+    fn async_rescale_and_read_pixels_yuv420_fails_on_raster_surface() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let mut surface = surfaces::raster_n32_premul((16, 16)).unwrap();
+        let results = Rc::new(RefCell::new(Vec::new()));
+
+        surface.async_rescale_and_read_pixels_yuv420(
+            YUVColorSpace::Rec709_Limited,
+            ColorSpace::new_srgb(),
+            IRect::from_wh(16, 16),
+            (16, 16),
+            RescaleGamma::Src,
+            RescaleMode::RepeatedCubic,
+            {
+                let results = results.clone();
+                move |result| results.borrow_mut().push(result.is_some())
+            },
+        );
+
+        assert_eq!(*results.borrow(), [false]);
+        assert_eq!(Rc::strong_count(&results), 1);
+    }
+
+    #[test]
+    fn test_drawing_owned_as_exclusive_ref_ergonomics() {
+        let mut surface = surfaces::raster_n32_premul((16, 16)).unwrap();
+
+        // option1:
+        // - An &canvas can be drawn to.
+        {
+            let canvas = Canvas::new(ISize::new(16, 16), None).unwrap();
+            surface.draw(&canvas, (5.0, 5.0), SamplingOptions::default(), None);
+            surface.draw(&canvas, (10.0, 10.0), SamplingOptions::default(), None);
+        }
+
+        // option2:
+        // - A canvas from another surface can be drawn to.
+        {
+            let mut surface2 = surfaces::raster_n32_premul((16, 16)).unwrap();
+            let canvas = surface2.canvas();
+            surface.draw(canvas, (5.0, 5.0), SamplingOptions::default(), None);
+            surface.draw(canvas, (10.0, 10.0), SamplingOptions::default(), None);
+        }
     }
 }

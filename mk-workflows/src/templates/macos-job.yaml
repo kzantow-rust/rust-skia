@@ -1,20 +1,19 @@
-runs-on: macOS-10.15
-env: 
+runs-on: macos-15
+env:
   SKIA_DEBUG: $[[skiaDebug]]
+  MACOSX_DEPLOYMENT_TARGET: '$[[macosxDeploymentTarget]]'
 
 steps:
-- uses: actions/checkout@v2
+- uses: actions/checkout@v3
   with:
     submodules: true
 
 - name: Install Rust
-  uses: hecrj/setup-rust-action@master
-  with:
-    rust-version: $[[rustToolchain]]
+  uses: dtolnay/rust-toolchain@$[[rustToolchain]]
 
 - name: Install Clippy
   run: rustup component add clippy
 
-# remove LLVM on macOS so that only Apple's clang is used
-- name: Remove LLVM (macOS)
-  run: brew uninstall llvm
+- name: Install Ninja
+  run: brew install ninja
+

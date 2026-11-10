@@ -1,17 +1,18 @@
 use std::fmt;
 
-use super::{DrawOptions, FontFamilies, TextAlign, TextDirection, TextStyle};
+use skia_bindings as sb;
+
+use super::{FontFamilies, TextAlign, TextDirection, TextStyle};
 use crate::{
+    FontStyle,
     interop::{self, AsStr, FromStrs, SetStr},
     modules::paragraph::TextHeightBehavior,
     prelude::*,
-    scalar, FontStyle,
+    scalar,
 };
-use skia_bindings as sb;
 
 pub type StrutStyle = Handle<sb::skia_textlayout_StrutStyle>;
-unsafe impl Send for StrutStyle {}
-unsafe impl Sync for StrutStyle {}
+unsafe_send_sync!(StrutStyle);
 
 impl NativeDrop for sb::skia_textlayout_StrutStyle {
     fn drop(&mut self) {
@@ -27,7 +28,7 @@ impl NativeClone for sb::skia_textlayout_StrutStyle {
 
 impl NativePartialEq for sb::skia_textlayout_StrutStyle {
     fn eq(&self, rhs: &Self) -> bool {
-        unsafe { sb::C_StrutStyle_equals(self, rhs) }
+        unsafe { sb::C_StrutStyle_Equals(self, rhs) }
     }
 }
 
@@ -47,6 +48,8 @@ impl fmt::Debug for StrutStyle {
             .field("leading", &self.leading())
             .field("strut_enabled", &self.strut_enabled())
             .field("force_strut_height", &self.force_strut_height())
+            .field("height_override", &self.height_override())
+            .field("half_leading", &self.half_leading())
             .finish()
     }
 }
@@ -126,22 +129,39 @@ impl StrutStyle {
         self.native_mut().fForceHeight = force_height;
         self
     }
+
+    pub fn height_override(&self) -> bool {
+        self.native().fHeightOverride
+    }
+
+    pub fn set_height_override(&mut self, height_override: bool) -> &mut Self {
+        self.native_mut().fHeightOverride = height_override;
+        self
+    }
+
+    pub fn half_leading(&self) -> bool {
+        self.native().fHalfLeading
+    }
+
+    pub fn set_half_leading(&mut self, half_leading: bool) -> &mut Self {
+        self.native_mut().fHalfLeading = half_leading;
+        self
+    }
 }
 
-// Can't use Handle<> here, std::u16string maintains an interior pointer.
+// Can't use `Handle<>` here, `std::u16string` maintains an interior pointer.
 pub type ParagraphStyle = RefHandle<sb::skia_textlayout_ParagraphStyle>;
-unsafe impl Send for ParagraphStyle {}
-unsafe impl Sync for ParagraphStyle {}
+unsafe_send_sync!(ParagraphStyle);
 
-impl NativeDrop for sb::skia_textlayout_ParagraphStyle {
-    fn drop(&mut self) {
-        unsafe { sb::C_ParagraphStyle_delete(self) }
+impl NativeDelete for sb::skia_textlayout_ParagraphStyle {
+    unsafe fn delete(ptr: *mut Self) {
+        unsafe { sb::C_ParagraphStyle_delete(ptr) }
     }
 }
 
 impl Clone for ParagraphStyle {
     fn clone(&self) -> Self {
-        Self::from_ptr(unsafe { sb::C_ParagraphStyle_NewCopy(self.native()) }).unwrap()
+        Self::from_ptr(unsafe { sb::C_ParagraphStyle_newCopy(self.native()) }).unwrap()
     }
 }
 
@@ -172,14 +192,20 @@ impl fmt::Debug for ParagraphStyle {
             .field("ellipsized", &self.ellipsized())
             .field("effective_align", &self.effective_align())
             .field("hinting_is_on", &self.hinting_is_on())
-            .field("draw_options", &self.draw_options())
+            .field("replace_tab_characters", &self.replace_tab_characters())
+            .field("fake_missing_font_styles", &self.fake_missing_font_styles())
+            .field(
+                "letter_spacing_by_css_spec",
+                &self.letter_spacing_by_css_spec(),
+            )
+            .field("render_soft_hyphens", &self.render_soft_hyphens())
             .finish()
     }
 }
 
 impl ParagraphStyle {
     pub fn new() -> Self {
-        Self::from_ptr(unsafe { sb::C_ParagraphStyle_New() }).unwrap()
+        Self::from_ptr(unsafe { sb::C_ParagraphStyle_new() }).unwrap()
     }
 
     pub fn strut_style(&self) -> &StrutStyle {
@@ -187,7 +213,7 @@ impl ParagraphStyle {
     }
 
     pub fn set_strut_style(&mut self, strut_style: StrutStyle) -> &mut Self {
-        self.native_mut().fStrutStyle.replace_with(strut_style);
+        unsafe { (*self.native_ptr()).fStrutStyle.replace_with(strut_style) };
         self
     }
 
@@ -197,9 +223,11 @@ impl ParagraphStyle {
 
     pub fn set_text_style(&mut self, text_style: &TextStyle) -> &mut Self {
         // TODO: implement the assignment operator in C.
-        self.native_mut()
-            .fDefaultTextStyle
-            .replace_with(text_style.clone());
+        unsafe {
+            (*self.native_ptr())
+                .fDefaultTextStyle
+                .replace_with(text_style.clone())
+        };
         self
     }
 
@@ -208,7 +236,7 @@ impl ParagraphStyle {
     }
 
     pub fn set_text_direction(&mut self, direction: TextDirection) -> &mut Self {
-        self.native_mut().fTextDirection = direction;
+        unsafe { (*self.native_ptr()).fTextDirection = direction };
         self
     }
 
@@ -217,19 +245,19 @@ impl ParagraphStyle {
     }
 
     pub fn set_text_align(&mut self, align: TextAlign) -> &mut Self {
-        self.native_mut().fTextAlign = align;
+        unsafe { (*self.native_ptr()).fTextAlign = align };
         self
     }
 
     pub fn max_lines(&self) -> Option<usize> {
         match self.native().fLinesLimit {
-            std::usize::MAX => None,
+            usize::MAX => None,
             lines => Some(lines),
         }
     }
 
     pub fn set_max_lines(&mut self, lines: impl Into<Option<usize>>) -> &mut Self {
-        self.native_mut().fLinesLimit = lines.into().unwrap_or(usize::max_value());
+        unsafe { (*self.native_ptr()).fLinesLimit = lines.into().unwrap_or(usize::MAX) };
         self
     }
 
@@ -240,7 +268,7 @@ impl ParagraphStyle {
     }
 
     pub fn set_ellipsis(&mut self, ellipsis: impl AsRef<str>) -> &mut Self {
-        self.native_mut().fEllipsis.set_str(ellipsis);
+        unsafe { (*self.native_ptr()).fEllipsis.set_str(ellipsis) };
         self
     }
 
@@ -249,7 +277,7 @@ impl ParagraphStyle {
     }
 
     pub fn set_height(&mut self, height: scalar) -> &mut Self {
-        self.native_mut().fHeight = height;
+        unsafe { (*self.native_ptr()).fHeight = height };
         self
     }
 
@@ -258,7 +286,7 @@ impl ParagraphStyle {
     }
 
     pub fn set_text_height_behavior(&mut self, v: TextHeightBehavior) -> &mut Self {
-        self.native_mut().fTextHeightBehavior = v;
+        unsafe { (*self.native_ptr()).fTextHeightBehavior = v };
         self
     }
 
@@ -279,16 +307,65 @@ impl ParagraphStyle {
     }
 
     pub fn turn_hinting_off(&mut self) -> &mut Self {
-        self.native_mut().fHintingIsOn = false;
+        unsafe { (*self.native_ptr()).fHintingIsOn = false };
         self
     }
 
-    pub fn draw_options(&self) -> DrawOptions {
-        self.native().fDrawingOptions
+    pub fn fake_missing_font_styles(&self) -> bool {
+        self.native().fFakeMissingFontStyles
     }
 
-    pub fn set_draw_options(&mut self, value: DrawOptions) -> &mut Self {
-        self.native_mut().fDrawingOptions = value;
+    pub fn set_fake_missing_font_styles(&mut self, value: bool) -> &mut Self {
+        unsafe { (*self.native_ptr()).fFakeMissingFontStyles = value };
         self
+    }
+
+    pub fn replace_tab_characters(&self) -> bool {
+        self.native().fReplaceTabCharacters
+    }
+
+    pub fn set_replace_tab_characters(&mut self, value: bool) -> &mut Self {
+        unsafe { (*self.native_ptr()).fReplaceTabCharacters = value };
+        self
+    }
+
+    pub fn apply_rounding_hack(&self) -> bool {
+        self.native().fApplyRoundingHack
+    }
+
+    pub fn set_apply_rounding_hack(&mut self, value: bool) -> &mut Self {
+        unsafe { (*self.native_ptr()).fApplyRoundingHack = value };
+        self
+    }
+
+    pub fn letter_spacing_by_css_spec(&self) -> bool {
+        self.native().fLetterSpacingByCSSSpec
+    }
+
+    pub fn set_letter_spacing_by_css_spec(&mut self, value: bool) -> &mut Self {
+        unsafe { (*self.native_ptr()).fLetterSpacingByCSSSpec = value };
+        self
+    }
+
+    pub fn render_soft_hyphens(&self) -> bool {
+        self.native().fRenderSoftHyphens
+    }
+
+    pub fn set_render_soft_hyphens(&mut self, value: bool) -> &mut Self {
+        unsafe { (*self.native_ptr()).fRenderSoftHyphens = value };
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ParagraphStyle;
+
+    // Regression test for https://github.com/rust-skia/rust-skia/issues/607
+    #[test]
+    fn paragraph_style_supports_equality() {
+        let a = ParagraphStyle::default();
+        let b = ParagraphStyle::default();
+        assert_eq!(a, b)
     }
 }

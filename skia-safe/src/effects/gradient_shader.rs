@@ -1,18 +1,63 @@
-use crate::{prelude::*, scalar, Color, Color4f, ColorSpace, Matrix, Point, Shader, TileMode};
-use skia_bindings as sb;
+#![allow(deprecated)]
+
+//! Deprecated gradient shader factory functions, use the [`crate::gradient`] module instead.
+
+use crate::{
+    Color, Color4f, ColorSpace, Matrix, Point, Shader, TileMode, gradient, scalar, shaders,
+};
+
+pub use gradient::{Colors as GradientColors, Gradient, Interpolation, interpolation};
+
+impl From<Flags> for Interpolation {
+    fn from(flags: Flags) -> Self {
+        let in_premul = if flags.contains(Flags::INTERPOLATE_COLORS_IN_PREMUL) {
+            interpolation::InPremul::Yes
+        } else {
+            interpolation::InPremul::No
+        };
+        Self {
+            in_premul,
+            color_space: interpolation::ColorSpace::Destination,
+            hue_method: interpolation::HueMethod::Shorter,
+        }
+    }
+}
 
 impl Shader {
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::linear_gradient() instead"
+    )]
     pub fn linear_gradient<'a>(
         points: (impl Into<Point>, impl Into<Point>),
         colors: impl Into<GradientShaderColors<'a>>,
         pos: impl Into<Option<&'a [scalar]>>,
         mode: TileMode,
-        flags: impl Into<Option<self::Flags>>,
+        flags: impl Into<Option<Flags>>,
         local_matrix: impl Into<Option<&'a Matrix>>,
     ) -> Option<Self> {
         linear(points, colors, pos, mode, flags, local_matrix)
     }
 
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::linear_gradient() instead"
+    )]
+    pub fn linear_gradient_with_interpolation<'a>(
+        points: (impl Into<Point>, impl Into<Point>),
+        colors: (&'a [Color4f], impl Into<Option<ColorSpace>>),
+        pos: impl Into<Option<&'a [scalar]>>,
+        mode: TileMode,
+        interpolation: impl Into<Interpolation>,
+        local_matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Self> {
+        linear_with_interpolation(points, colors, pos, mode, interpolation, local_matrix)
+    }
+
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::radial_gradient() instead"
+    )]
     pub fn radial_gradient<'a>(
         center: impl Into<Point>,
         radius: scalar,
@@ -25,6 +70,33 @@ impl Shader {
         radial(center, radius, colors, pos, mode, flags, local_matrix)
     }
 
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::radial_gradient() instead"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn radial_gradient_with_interpolation<'a>(
+        center_and_radius: (impl Into<Point>, scalar),
+        colors: (&'a [Color4f], impl Into<Option<ColorSpace>>),
+        pos: impl Into<Option<&'a [scalar]>>,
+        mode: TileMode,
+        interpolation: impl Into<Interpolation>,
+        local_matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Shader> {
+        radial_with_interpolation(
+            center_and_radius,
+            colors,
+            pos,
+            mode,
+            interpolation,
+            local_matrix,
+        )
+    }
+
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::two_point_conical_gradient() instead"
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn two_point_conical_gradient<'a>(
         start: impl Into<Point>,
@@ -50,6 +122,34 @@ impl Shader {
         )
     }
 
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::two_point_conical_gradient() instead"
+    )]
+    pub fn two_point_conical_gradient_with_interpolation<'a>(
+        start_and_radius: (impl Into<Point>, scalar),
+        end_and_radius: (impl Into<Point>, scalar),
+        colors: (&'a [Color4f], impl Into<Option<ColorSpace>>),
+        pos: impl Into<Option<&'a [scalar]>>,
+        mode: TileMode,
+        interpolation: impl Into<Interpolation>,
+        local_matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Shader> {
+        two_point_conical_with_interpolation(
+            start_and_radius,
+            end_and_radius,
+            colors,
+            pos,
+            mode,
+            interpolation,
+            local_matrix,
+        )
+    }
+
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::sweep_gradient() instead"
+    )]
     pub fn sweep_gradient<'a>(
         center: impl Into<Point>,
         colors: impl Into<GradientShaderColors<'a>>,
@@ -61,11 +161,36 @@ impl Shader {
     ) -> Option<Self> {
         sweep(center, colors, pos, mode, angles, flags, local_matrix)
     }
+
+    #[deprecated(
+        since = "0.93.0",
+        note = "Use gradient::shaders::sweep_gradient() instead"
+    )]
+    pub fn sweep_gradient_with_interpolation<'a>(
+        center: impl Into<Point>,
+        colors: (&'a [Color4f], impl Into<Option<ColorSpace>>),
+        pos: impl Into<Option<&'a [scalar]>>,
+        mode: TileMode,
+        angles: impl Into<Option<(scalar, scalar)>>,
+        interpolation: impl Into<Interpolation>,
+        local_matrix: impl Into<Option<&'a Matrix>>,
+    ) -> Option<Shader> {
+        sweep_with_interpolation(
+            center,
+            colors,
+            pos,
+            mode,
+            angles,
+            interpolation,
+            local_matrix,
+        )
+    }
 }
 
 bitflags! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Flags: u32 {
-        const INTERPOLATE_COLORS_IN_PREMUL = sb::SkGradientShader_Flags_kInterpolateColorsInPremul_Flag as _;
+        const INTERPOLATE_COLORS_IN_PREMUL = 1 << 0;
     }
 }
 
@@ -80,42 +205,45 @@ pub fn linear<'a>(
     colors: impl Into<GradientShaderColors<'a>>,
     pos: impl Into<Option<&'a [scalar]>>,
     mode: TileMode,
-    flags: impl Into<Option<self::Flags>>,
+    flags: impl Into<Option<Flags>>,
     local_matrix: impl Into<Option<&'a Matrix>>,
 ) -> Option<Shader> {
-    let points = [points.0.into(), points.1.into()];
     let colors = colors.into();
     let pos = pos.into();
-    assert!(pos.is_none() || (pos.unwrap().len() == colors.len()));
     let flags = flags.into().unwrap_or_default();
-    let local_matrix = local_matrix.into();
 
-    Shader::from_ptr(unsafe {
-        match colors {
-            GradientShaderColors::Colors(colors) => sb::C_SkGradientShader_MakeLinear(
-                points.native().as_ptr(),
-                colors.native().as_ptr(),
-                pos.as_ptr_or_null(),
-                colors.len().try_into().unwrap(),
-                mode,
-                flags.bits(),
-                local_matrix.native_ptr_or_null(),
-            ),
-
-            GradientShaderColors::ColorsInSpace(colors, color_space) => {
-                sb::C_SkGradientShader_MakeLinear2(
-                    points.native().as_ptr(),
-                    colors.native().as_ptr(),
-                    color_space.into_ptr(),
-                    pos.as_ptr_or_null(),
-                    colors.len().try_into().unwrap(),
-                    mode,
-                    flags.bits(),
-                    local_matrix.native_ptr_or_null(),
-                )
-            }
+    match colors {
+        GradientShaderColors::Colors(colors) => {
+            // Convert Color to Color4f
+            let colors4f: Vec<Color4f> = colors.iter().map(|c| Color4f::from(*c)).collect();
+            let grad_colors = GradientColors::new(&colors4f, pos, mode, None);
+            let grad = Gradient::new(grad_colors, flags);
+            shaders::linear_gradient(points, &grad, local_matrix)
         }
-    })
+        GradientShaderColors::ColorsInSpace(colors, color_space) => linear_with_interpolation(
+            points,
+            (colors, color_space),
+            pos,
+            mode,
+            flags,
+            local_matrix,
+        ),
+    }
+}
+
+pub fn linear_with_interpolation<'a>(
+    points: (impl Into<Point>, impl Into<Point>),
+    (colors, color_space): (&'a [Color4f], impl Into<Option<ColorSpace>>),
+    pos: impl Into<Option<&'a [scalar]>>,
+    mode: TileMode,
+    interpolation: impl Into<Interpolation>,
+    local_matrix: impl Into<Option<&'a Matrix>>,
+) -> Option<Shader> {
+    let pos = pos.into();
+    let color_space = color_space.into();
+    let grad_colors = GradientColors::new(colors, pos, mode, color_space);
+    let grad = Gradient::new(grad_colors, interpolation);
+    shaders::linear_gradient(points, &grad, local_matrix)
 }
 
 pub fn radial<'a>(
@@ -128,40 +256,40 @@ pub fn radial<'a>(
     local_matrix: impl Into<Option<&'a Matrix>>,
 ) -> Option<Shader> {
     let colors = colors.into();
-    let center = center.into();
     let pos = pos.into();
-    assert!(pos.is_none() || (pos.unwrap().len() == colors.len()));
     let flags = flags.into().unwrap_or_default();
-    let local_matrix = local_matrix.into();
 
-    Shader::from_ptr(unsafe {
-        match colors {
-            GradientShaderColors::Colors(colors) => sb::C_SkGradientShader_MakeRadial(
-                center.native(),
-                radius,
-                colors.native().as_ptr(),
-                pos.as_ptr_or_null(),
-                colors.len().try_into().unwrap(),
-                mode,
-                flags.bits(),
-                local_matrix.native_ptr_or_null(),
-            ),
-
-            GradientShaderColors::ColorsInSpace(colors, color_space) => {
-                sb::C_SkGradientShader_MakeRadial2(
-                    center.native(),
-                    radius,
-                    colors.native().as_ptr(),
-                    color_space.into_ptr(),
-                    pos.as_ptr_or_null(),
-                    colors.len().try_into().unwrap(),
-                    mode,
-                    flags.bits(),
-                    local_matrix.native_ptr_or_null(),
-                )
-            }
+    match colors {
+        GradientShaderColors::Colors(colors) => {
+            let colors4f: Vec<Color4f> = colors.iter().map(|c| Color4f::from(*c)).collect();
+            let grad_colors = GradientColors::new(&colors4f, pos, mode, None);
+            let grad = Gradient::new(grad_colors, flags);
+            shaders::radial_gradient((center, radius), &grad, local_matrix)
         }
-    })
+        GradientShaderColors::ColorsInSpace(colors, color_space) => radial_with_interpolation(
+            (center, radius),
+            (colors, color_space),
+            pos,
+            mode,
+            flags,
+            local_matrix,
+        ),
+    }
+}
+
+pub fn radial_with_interpolation<'a>(
+    (center, radius): (impl Into<Point>, scalar),
+    (colors, color_space): (&'a [Color4f], impl Into<Option<ColorSpace>>),
+    pos: impl Into<Option<&'a [scalar]>>,
+    mode: TileMode,
+    interpolation: impl Into<Interpolation>,
+    local_matrix: impl Into<Option<&'a Matrix>>,
+) -> Option<Shader> {
+    let pos = pos.into();
+    let color_space = color_space.into();
+    let grad_colors = GradientColors::new(colors, pos, mode, color_space);
+    let grad = Gradient::new(grad_colors, interpolation);
+    shaders::radial_gradient((center, radius), &grad, local_matrix)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,45 +305,54 @@ pub fn two_point_conical<'a>(
     local_matrix: impl Into<Option<&'a Matrix>>,
 ) -> Option<Shader> {
     let colors = colors.into();
-    let start = start.into();
-    let end = end.into();
     let pos = pos.into();
-    assert!(pos.is_none() || (pos.unwrap().len() == colors.len()));
     let flags = flags.into().unwrap_or_default();
-    let local_matrix = local_matrix.into();
 
-    Shader::from_ptr(unsafe {
-        match colors {
-            GradientShaderColors::Colors(colors) => sb::C_SkGradientShader_MakeTwoPointConical(
-                start.native(),
-                start_radius,
-                end.native(),
-                end_radius,
-                colors.native().as_ptr(),
-                pos.as_ptr_or_null(),
-                colors.len().try_into().unwrap(),
-                mode,
-                flags.bits(),
-                local_matrix.native_ptr_or_null(),
-            ),
-
-            GradientShaderColors::ColorsInSpace(colors, color_space) => {
-                sb::C_SkGradientShader_MakeTwoPointConical2(
-                    start.native(),
-                    start_radius,
-                    end.native(),
-                    end_radius,
-                    colors.native().as_ptr(),
-                    color_space.into_ptr(),
-                    pos.as_ptr_or_null(),
-                    colors.len().try_into().unwrap(),
-                    mode,
-                    flags.bits(),
-                    local_matrix.native_ptr_or_null(),
-                )
-            }
+    match colors {
+        GradientShaderColors::Colors(colors) => {
+            let colors4f: Vec<Color4f> = colors.iter().map(|c| Color4f::from(*c)).collect();
+            let grad_colors = GradientColors::new(&colors4f, pos, mode, None);
+            let grad = Gradient::new(grad_colors, flags);
+            shaders::two_point_conical_gradient(
+                (start, start_radius),
+                (end, end_radius),
+                &grad,
+                local_matrix,
+            )
         }
-    })
+        GradientShaderColors::ColorsInSpace(colors, color_space) => {
+            two_point_conical_with_interpolation(
+                (start, start_radius),
+                (end, end_radius),
+                (colors, color_space),
+                pos,
+                mode,
+                flags,
+                local_matrix,
+            )
+        }
+    }
+}
+
+pub fn two_point_conical_with_interpolation<'a>(
+    (start, start_radius): (impl Into<Point>, scalar),
+    (end, end_radius): (impl Into<Point>, scalar),
+    (colors, color_space): (&'a [Color4f], impl Into<Option<ColorSpace>>),
+    pos: impl Into<Option<&'a [scalar]>>,
+    mode: TileMode,
+    interpolation: impl Into<Interpolation>,
+    local_matrix: impl Into<Option<&'a Matrix>>,
+) -> Option<Shader> {
+    let pos = pos.into();
+    let color_space = color_space.into();
+    let grad_colors = GradientColors::new(colors, pos, mode, color_space);
+    let grad = Gradient::new(grad_colors, interpolation);
+    shaders::two_point_conical_gradient(
+        (start, start_radius),
+        (end, end_radius),
+        &grad,
+        local_matrix,
+    )
 }
 
 pub fn sweep<'a>(
@@ -227,51 +364,56 @@ pub fn sweep<'a>(
     flags: impl Into<Option<self::Flags>>,
     local_matrix: impl Into<Option<&'a Matrix>>,
 ) -> Option<Shader> {
-    let center = center.into();
     let colors = colors.into();
     let pos = pos.into();
-    assert!(pos.is_none() || (pos.unwrap().len() == colors.len()));
     let angles = angles.into();
     let flags = flags.into().unwrap_or_default();
-    let local_matrix = local_matrix.into();
 
     let (start_angle, end_angle) = (
         angles.map(|a| a.0).unwrap_or(0.0),
         angles.map(|a| a.1).unwrap_or(360.0),
     );
 
-    Shader::from_ptr(unsafe {
-        match colors {
-            GradientShaderColors::Colors(colors) => sb::C_SkGradientShader_MakeSweep(
-                center.x,
-                center.y,
-                colors.native().as_ptr(),
-                pos.as_ptr_or_null(),
-                colors.len().try_into().unwrap(),
-                mode,
-                start_angle,
-                end_angle,
-                flags.bits(),
-                local_matrix.native_ptr_or_null(),
-            ),
-
-            GradientShaderColors::ColorsInSpace(colors, color_space) => {
-                sb::C_SkGradientShader_MakeSweep2(
-                    center.x,
-                    center.y,
-                    colors.native().as_ptr(),
-                    color_space.into_ptr(),
-                    pos.as_ptr_or_null(),
-                    colors.len().try_into().unwrap(),
-                    mode,
-                    start_angle,
-                    end_angle,
-                    flags.bits(),
-                    local_matrix.native_ptr_or_null(),
-                )
-            }
+    match colors {
+        GradientShaderColors::Colors(colors) => {
+            let colors4f: Vec<Color4f> = colors.iter().map(|c| Color4f::from(*c)).collect();
+            let grad_colors = GradientColors::new(&colors4f, pos, mode, None);
+            let grad = Gradient::new(grad_colors, flags);
+            shaders::sweep_gradient(center, (start_angle, end_angle), &grad, local_matrix)
         }
-    })
+        GradientShaderColors::ColorsInSpace(colors, color_space) => sweep_with_interpolation(
+            center,
+            (colors, color_space),
+            pos,
+            mode,
+            angles,
+            flags,
+            local_matrix,
+        ),
+    }
+}
+
+pub fn sweep_with_interpolation<'a>(
+    center: impl Into<Point>,
+    (colors, color_space): (&'a [Color4f], impl Into<Option<ColorSpace>>),
+    pos: impl Into<Option<&'a [scalar]>>,
+    mode: TileMode,
+    angles: impl Into<Option<(scalar, scalar)>>,
+    interpolation: impl Into<Interpolation>,
+    local_matrix: impl Into<Option<&'a Matrix>>,
+) -> Option<Shader> {
+    let pos = pos.into();
+    let angles = angles.into();
+    let color_space = color_space.into();
+
+    let (start_angle, end_angle) = (
+        angles.map(|a| a.0).unwrap_or(0.0),
+        angles.map(|a| a.1).unwrap_or(360.0),
+    );
+
+    let grad_colors = GradientColors::new(colors, pos, mode, color_space);
+    let grad = Gradient::new(grad_colors, interpolation);
+    shaders::sweep_gradient(center, (start_angle, end_angle), &grad, local_matrix)
 }
 
 /// Type that represents either a slice of [`Color`], or a slice of [`Color4f`] and a color space.
@@ -280,7 +422,7 @@ pub fn sweep<'a>(
 #[derive(Debug)]
 pub enum GradientShaderColors<'a> {
     Colors(&'a [Color]),
-    ColorsInSpace(&'a [Color4f], ColorSpace),
+    ColorsInSpace(&'a [Color4f], Option<ColorSpace>),
 }
 
 impl GradientShaderColors<'_> {
@@ -305,6 +447,18 @@ impl<'a> From<&'a [Color]> for GradientShaderColors<'a> {
 
 impl<'a> From<(&'a [Color4f], ColorSpace)> for GradientShaderColors<'a> {
     fn from(c: (&'a [Color4f], ColorSpace)) -> Self {
+        GradientShaderColors::<'a>::ColorsInSpace(c.0, Some(c.1))
+    }
+}
+
+impl<'a> From<(&'a [Color4f], Option<ColorSpace>)> for GradientShaderColors<'a> {
+    fn from(c: (&'a [Color4f], Option<ColorSpace>)) -> Self {
         GradientShaderColors::<'a>::ColorsInSpace(c.0, c.1)
+    }
+}
+
+impl<'a> From<&'a [Color4f]> for GradientShaderColors<'a> {
+    fn from(c: &'a [Color4f]) -> Self {
+        GradientShaderColors::<'a>::ColorsInSpace(c, None)
     }
 }

@@ -1,16 +1,16 @@
-use crate::{prelude::*, ColorFilter, IRect, Matrix, NativeFlattenable, Rect};
+//! Base class for image filters: when installed in a [`crate::Paint`], drawing occurs as usual but
+//! as if into an offscreen, which is then filtered before being drawn to the device.
+
+use crate::{ColorFilter, IRect, Matrix, NativeFlattenable, Rect, prelude::*};
 use skia_bindings::{self as sb, SkColorFilter, SkFlattenable, SkImageFilter, SkRefCntBase};
 use std::{fmt, ptr};
 
 pub use skia_bindings::SkImageFilter_MapDirection as MapDirection;
-#[test]
-fn test_map_direction_naming() {
-    let _ = MapDirection::Forward;
-}
+variant_name!(MapDirection::Forward);
 
 pub type ImageFilter = RCHandle<SkImageFilter>;
-unsafe impl Send for ImageFilter {}
-unsafe impl Sync for ImageFilter {}
+unsafe_send_sync!(ImageFilter);
+require_base_type!(SkImageFilter, SkFlattenable);
 
 impl NativeBase<SkRefCntBase> for SkImageFilter {}
 impl NativeBase<SkFlattenable> for SkImageFilter {}
@@ -51,13 +51,14 @@ impl ImageFilter {
         map_direction: MapDirection,
         input_rect: impl Into<Option<&'a IRect>>,
     ) -> IRect {
-        IRect::from_native_c(unsafe {
+        IRect::construct(|r| unsafe {
             sb::C_SkImageFilter_filterBounds(
                 self.native(),
                 src.as_ref().native(),
                 ctm.native(),
                 map_direction,
                 input_rect.into().native_ptr_or_null(),
+                r,
             )
         })
     }
@@ -104,13 +105,13 @@ impl ImageFilter {
         })
     }
 
-    pub fn inputs(&self) -> impl Iterator<Item = Option<ImageFilter>> + '_ {
+    pub fn inputs(&self) -> impl Iterator<Item = Option<ImageFilter>> + use<'_> {
         (0..self.count_inputs()).map(move |i| self.get_input(i))
     }
 
     pub fn compute_fast_bounds(&self, bounds: impl AsRef<Rect>) -> Rect {
-        Rect::from_native_c(unsafe {
-            sb::C_SkImageFilter_computeFastBounds(self.native(), bounds.as_ref().native())
+        Rect::construct(|r| unsafe {
+            sb::C_SkImageFilter_computeFastBounds(self.native(), bounds.as_ref().native(), r)
         })
     }
 

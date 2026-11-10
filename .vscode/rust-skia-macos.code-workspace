@@ -1,0 +1,12 @@
+{
+    "folders": [{
+        "path": ".."
+    }],
+    "settings": {
+        "rust-analyzer": {
+            "cargo": {
+                "features": ["gl", "vulkan", "metal", "textlayout", "svg", "skottie", "ureq", "webp", "wgpu-30"]
+            }
+        }
+    }
+}

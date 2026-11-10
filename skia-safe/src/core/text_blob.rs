@@ -1,26 +1,32 @@
-use crate::{
-    prelude::*, scalar, Font, GlyphId, Paint, Point, RSXform, Rect, TextEncoding, Typeface,
-};
+//! Combines multiple text runs into an immutable container. Each text run consists of glyphs,
+//! [`Paint`], and position. Only parts of [`Paint`] related to fonts and text rendering are used by
+//! a run.
+
+use std::{fmt, ptr, slice};
+
 use skia_bindings::{
-    self as sb, SkTextBlob, SkTextBlobBuilder, SkTextBlob_Iter, SkTextBlob_Iter_Run, SkTypeface,
+    self as sb, SkTextBlob, SkTextBlob_Iter, SkTextBlob_Iter_Run, SkTextBlobBuilder, SkTypeface,
 };
-use std::{convert::TryInto, fmt, ptr, slice};
+
+use crate::{
+    EncodedText, Font, GlyphId, Paint, Point, RSXform, Rect, Typeface, prelude::*, scalar,
+};
 
 pub type TextBlob = RCHandle<SkTextBlob>;
-unsafe impl Send for TextBlob {}
-unsafe impl Sync for TextBlob {}
+unsafe_send_sync!(TextBlob);
+require_base_type!(SkTextBlob, sb::SkNVRefCnt);
 
 impl NativeRefCounted for SkTextBlob {
-    fn _ref(&self) {
-        unsafe { sb::C_SkTextBlob_ref(self) };
+    unsafe fn _ref(ptr: *const Self) {
+        unsafe { sb::C_SkTextBlob_ref(ptr) };
     }
 
-    fn _unref(&self) {
-        unsafe { sb::C_SkTextBlob_unref(self) }
+    unsafe fn _unref(ptr: *const Self) {
+        unsafe { sb::C_SkTextBlob_unref(ptr) }
     }
 
-    fn unique(&self) -> bool {
-        unsafe { sb::C_SkTextBlob_unique(self) }
+    unsafe fn unique(ptr: *const Self) -> bool {
+        unsafe { sb::C_SkTextBlob_unique(ptr) }
     }
 }
 
@@ -38,15 +44,27 @@ impl TextBlob {
         Self::from_str(str, font)
     }
 
+    /// Returns the conservative bounding box. Uses the [`Paint`] associated with each glyph to
+    /// determine glyph bounds, and unions all bounds. The returned bounds may be larger than the
+    /// bounds of all glyphs in runs.
     pub fn bounds(&self) -> &Rect {
         Rect::from_native_ref(&self.native().fBounds)
     }
 
+    /// Returns a non-zero value unique among all text blobs.
     pub fn unique_id(&self) -> u32 {
         self.native().fUniqueID
     }
 
     // TODO: consider to provide an inplace variant.
+    /// Returns the number of intervals that intersect `bounds`. `bounds` describes a pair of lines
+    /// parallel to the text advance. The return count is zero or a multiple of two, and is at most
+    /// twice the number of glyphs in the blob.
+    ///
+    /// Runs within the blob that contain [`RSXform`] are ignored when computing intercepts.
+    ///
+    /// - `bounds` lower and upper line parallel to the advance
+    /// - `paint` optional paint specifying stroking and path effect that affects the result
     pub fn get_intercepts(&self, bounds: [scalar; 2], paint: Option<&Paint>) -> Vec<scalar> {
         unsafe {
             let count = self.native().getIntercepts(
@@ -65,36 +83,62 @@ impl TextBlob {
         }
     }
 
+    /// Creates a text blob with a single run. The string is encoded as UTF-8.
+    ///
+    /// `font` contains attributes used to define the run text.
+    ///
+    /// This function uses the default character-to-glyph mapping from the [`Typeface`] in `font`.
+    /// It does not perform typeface fallback for characters not found in the [`Typeface`]. It does
+    /// not perform kerning or other complex shaping; glyphs are positioned based on their default
+    /// advances.
+    ///
+    /// - `str` character code points drawn
+    /// - `font` text size, typeface, text scale, and so on, used to draw
     pub fn from_str(str: impl AsRef<str>, font: &Font) -> Option<TextBlob> {
-        Self::from_text(str.as_ref().as_bytes(), TextEncoding::UTF8, font)
+        Self::from_text(str.as_ref(), font)
     }
 
-    pub fn from_text(text: &[u8], encoding: TextEncoding, font: &Font) -> Option<TextBlob> {
+    /// Creates a text blob with a single run.
+    ///
+    /// `font` contains attributes used to define the run text.
+    ///
+    /// When the encoding is UTF-8, UTF-16, or UTF-32, this function uses the default
+    /// character-to-glyph mapping from the [`Typeface`] in `font`. It does not perform typeface
+    /// fallback for characters not found in the [`Typeface`]. It does not perform kerning or other
+    /// complex shaping; glyphs are positioned based on their default advances.
+    ///
+    /// - `text` character code points or glyphs drawn
+    /// - `font` text size, typeface, text scale, and so on, used to draw
+    pub fn from_text(text: impl EncodedText, font: &Font) -> Option<TextBlob> {
+        let (ptr, size, encoding) = text.as_raw();
         TextBlob::from_ptr(unsafe {
-            sb::C_SkTextBlob_MakeFromText(
-                text.as_ptr() as _,
-                text.len(),
-                font.native(),
-                encoding.into_native(),
-            )
+            sb::C_SkTextBlob_MakeFromText(ptr, size, font.native(), encoding.into_native())
         })
     }
 
+    /// Returns a text blob built from a single run of text with x-positions and a single y value.
+    /// This is equivalent to using [`TextBlobBuilder`] and calling `alloc_run_pos_h`. Returns `None`
+    /// if the text is empty.
+    ///
+    /// - `text` character code points or glyphs drawn (based on encoding)
+    /// - `x_pos` array of x-positions, must contain values for all of the character points
+    /// - `const_y` shared y-position for each character point, to be paired with each `x_pos`
+    /// - `font` font used for this run
     pub fn from_pos_text_h(
-        text: &[u8],
+        text: impl EncodedText,
         x_pos: &[scalar],
         const_y: scalar,
         font: &Font,
-        encoding: impl Into<Option<TextEncoding>>,
     ) -> Option<TextBlob> {
-        let encoding = encoding.into().unwrap_or_default();
-        // TODO: avoid that verification somehow.
-        assert_eq!(x_pos.len(), font.count_text(text, encoding));
+        // TODO: avoid that somehow.
+        assert_eq!(x_pos.len(), font.count_text(&text));
+        let (ptr, size, encoding) = text.as_raw();
         TextBlob::from_ptr(unsafe {
             sb::C_SkTextBlob_MakeFromPosTextH(
-                text.as_ptr() as _,
-                text.len(),
+                ptr,
+                size,
                 x_pos.as_ptr(),
+                x_pos.len(),
                 const_y,
                 font.native(),
                 encoding.into_native(),
@@ -102,20 +146,21 @@ impl TextBlob {
         })
     }
 
-    pub fn from_pos_text(
-        text: &[u8],
-        pos: &[Point],
-        font: &Font,
-        encoding: impl Into<Option<TextEncoding>>,
-    ) -> Option<TextBlob> {
-        let encoding = encoding.into().unwrap_or_default();
-        // TODO: avoid that verification somehow.
-        assert_eq!(pos.len(), font.count_text(text, encoding));
+    /// Returns a text blob built from a single run of text with positions. This is equivalent to
+    /// using [`TextBlobBuilder`] and calling `alloc_run_pos`. Returns `None` if the text is empty.
+    ///
+    /// - `text` character code points or glyphs drawn (based on encoding)
+    /// - `pos` array of positions, must contain values for all of the character points
+    /// - `font` font used for this run
+    pub fn from_pos_text(text: impl EncodedText, pos: &[Point], font: &Font) -> Option<TextBlob> {
+        assert_eq!(pos.len(), font.count_text(&text));
+        let (ptr, size, encoding) = text.as_raw();
         TextBlob::from_ptr(unsafe {
             sb::C_SkTextBlob_MakeFromPosText(
-                text.as_ptr() as _,
-                text.len(),
+                ptr,
+                size,
                 pos.native().as_ptr(),
+                pos.len(),
                 font.native(),
                 encoding.into_native(),
             )
@@ -123,19 +168,18 @@ impl TextBlob {
     }
 
     pub fn from_rsxform(
-        text: &[u8],
+        text: impl EncodedText,
         xform: &[RSXform],
         font: &Font,
-        encoding: impl Into<Option<TextEncoding>>,
     ) -> Option<TextBlob> {
-        let encoding = encoding.into().unwrap_or_default();
-        // TODO: avoid that verification somehow.
-        assert_eq!(xform.len(), font.count_text(text, encoding));
+        assert_eq!(xform.len(), font.count_text(&text));
+        let (ptr, size, encoding) = text.as_raw();
         TextBlob::from_ptr(unsafe {
             sb::C_SkTextBlob_MakeFromRSXform(
-                text.as_ptr() as _,
-                text.len(),
+                ptr,
+                size,
                 xform.native().as_ptr(),
+                xform.len(),
                 font.native(),
                 encoding.into_native(),
             )
@@ -143,9 +187,9 @@ impl TextBlob {
     }
 }
 
+/// Helper class for constructing [`TextBlob`].
 pub type TextBlobBuilder = Handle<SkTextBlobBuilder>;
-unsafe impl Send for TextBlobBuilder {}
-unsafe impl Sync for TextBlobBuilder {}
+unsafe_send_sync!(TextBlobBuilder);
 
 impl NativeDrop for SkTextBlobBuilder {
     fn drop(&mut self) {
@@ -160,14 +204,37 @@ impl fmt::Debug for TextBlobBuilder {
 }
 
 impl TextBlobBuilder {
+    /// Constructs an empty text blob builder. By default, the text blob builder has no runs.
     pub fn new() -> Self {
         Self::from_native_c(unsafe { SkTextBlobBuilder::new() })
     }
 
+    /// Returns a [`TextBlob`] built from runs of glyphs added by the builder. The returned
+    /// [`TextBlob`] is immutable; it may be copied, but its contents may not be altered. Returns
+    /// `None` if no runs of glyphs were added by the builder.
+    ///
+    /// Resets the text blob builder to its initial empty state, allowing it to be reused to build
+    /// a new set of runs.
     pub fn make(&mut self) -> Option<TextBlob> {
         TextBlob::from_ptr(unsafe { sb::C_SkTextBlobBuilder_make(self.native_mut()) })
     }
 
+    /// Returns a run with storage for glyphs. The caller must write `count` glyphs to the returned
+    /// glyph buffer before the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned on a baseline at `offset`, using font metrics to determine their
+    /// relative placement.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from `offset` and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `offset` horizontal and vertical offset within the blob
+    /// - `bounds` optional run bounding box
     pub fn alloc_run(
         &mut self,
         font: &Font,
@@ -188,6 +255,23 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs and positions along a baseline. The caller must write
+    /// `count` glyphs to the returned glyph buffer and `count` scalars to the returned position
+    /// buffer before the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned on a baseline at `y`, using x-axis positions written by the caller to
+    /// the returned position buffer.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from `y`, the position buffer, and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `y` vertical offset within the blob
+    /// - `bounds` optional run bounding box
     pub fn alloc_run_pos_h(
         &mut self,
         font: &Font,
@@ -209,6 +293,22 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs and point positions. The caller must write `count`
+    /// glyphs to the returned glyph buffer and `count` points to the returned position buffer
+    /// before the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned using the points written by the caller to the returned position
+    /// buffer, using two scalar values for each point.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from the position buffer and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `bounds` optional run bounding box
     pub fn alloc_run_pos(
         &mut self,
         font: &Font,
@@ -228,6 +328,14 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs and [`RSXform`] positions. The caller must write
+    /// `count` glyphs to the returned glyph buffer and `count` [`RSXform`]s to the returned position
+    /// buffer before the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
     pub fn alloc_run_rsxform(
         &mut self,
         font: &Font,
@@ -244,6 +352,25 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs, text, and clusters. The caller must write `count`
+    /// glyphs to the returned glyph buffer, `text_byte_count` UTF-8 code units into the returned
+    /// text buffer, and `count` monotonic indexes into the text buffer into the returned cluster
+    /// buffer before the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned on a baseline at `offset`, using font metrics to determine their
+    /// relative placement.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from `offset` and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `offset` horizontal and vertical offset within the blob
+    /// - `text_byte_count` number of UTF-8 code units
+    /// - `bounds` optional run bounding box
     pub fn alloc_run_text(
         &mut self,
         font: &Font,
@@ -270,6 +397,26 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs, positions along a baseline, text, and clusters. The
+    /// caller must write `count` glyphs to the returned glyph buffer, `count` scalars to the
+    /// returned position buffer, `text_byte_count` UTF-8 code units into the returned text buffer,
+    /// and `count` monotonic indexes into the text buffer into the returned cluster buffer before
+    /// the next call to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned on a baseline at `y`, using x-axis positions written by the caller to
+    /// the returned position buffer.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from `y`, the position buffer, and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `y` vertical offset within the blob
+    /// - `text_byte_count` number of UTF-8 code units
+    /// - `bounds` optional run bounding box
     pub fn alloc_run_text_pos_h(
         &mut self,
         font: &Font,
@@ -295,6 +442,25 @@ impl TextBlobBuilder {
         }
     }
 
+    /// Returns a run with storage for glyphs, point positions, text, and clusters. The caller must
+    /// write `count` glyphs to the returned glyph buffer, `count` points to the returned position
+    /// buffer, `text_byte_count` UTF-8 code units into the returned text buffer, and `count`
+    /// monotonic indexes into the text buffer into the returned cluster buffer before the next call
+    /// to the text blob builder.
+    ///
+    /// Glyphs share metrics in `font`.
+    ///
+    /// Glyphs are positioned using the points written by the caller to the returned position
+    /// buffer, using two scalar values for each point.
+    ///
+    /// `bounds` defines an optional bounding box, used to suppress drawing when the text blob bounds
+    /// does not intersect the surface bounds. If `bounds` is `None`, the text blob bounds is
+    /// computed from the position buffer and the glyph metrics.
+    ///
+    /// - `font` font used for this run
+    /// - `count` number of glyphs
+    /// - `text_byte_count` number of UTF-8 code units
+    /// - `bounds` optional run bounding box
     pub fn alloc_run_text_pos(
         &mut self,
         font: &Font,
@@ -346,7 +512,7 @@ pub type TextBlobIter<'a> = Borrows<'a, Handle<SkTextBlob_Iter>>;
 
 pub struct TextBlobRun<'a> {
     typeface: *mut SkTypeface,
-    pub glyph_indices: &'a [u16],
+    pub glyph_indices: &'a [GlyphId],
 }
 
 impl fmt::Debug for TextBlobRun<'_> {
@@ -405,7 +571,8 @@ impl<'a> Iterator for Borrows<'a, Handle<SkTextBlob_Iter>> {
 }
 
 #[test]
-fn test_point_size_equals_size_of_two_scalars_used_in_alloc_run_pos() {
+fn test_point_size_and_alignment_equals_size_of_two_scalars_used_in_alloc_run_pos() {
     use std::mem;
-    assert_eq!(mem::size_of::<Point>(), mem::size_of::<[scalar; 2]>())
+    assert_eq!(mem::size_of::<Point>(), mem::size_of::<[scalar; 2]>());
+    assert_eq!(mem::align_of::<Point>(), mem::align_of::<[scalar; 2]>());
 }

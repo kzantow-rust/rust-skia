@@ -1,14 +1,15 @@
-use super::image_info;
-use crate::{prelude::*, EncodedOrigin, ISize, Matrix};
-use skia_bindings::{self as sb, SkYUVAInfo, SkYUVAInfo_Subsampling};
+//! Specifies the structure of planes for a YUV image with optional alpha. The actual planar data
+//! is not part of this structure and depending on usage is in external textures or pixmaps.
 
+use super::image_info;
+use crate::{EncodedOrigin, ISize, Matrix, prelude::*};
+use skia_bindings::{self as sb, SkYUVAInfo, SkYUVAInfo_Subsampling};
 use std::{fmt, ptr};
 
 /// Specifies the structure of planes for a YUV image with optional alpha. The actual planar data
 /// is not part of this structure and depending on usage is in external textures or pixmaps.
 pub type YUVAInfo = Handle<SkYUVAInfo>;
-unsafe impl Send for YUVAInfo {}
-unsafe impl Sync for YUVAInfo {}
+unsafe_send_sync!(YUVAInfo);
 
 impl NativeDrop for SkYUVAInfo {
     fn drop(&mut self) {
@@ -28,11 +29,14 @@ impl NativeDrop for SkYUVAInfo {
 /// RGB                      0:R,    1:G, 2:B
 /// RGBA                     0:R,    1:G, 2:B, 3:A
 pub use sb::SkYUVAInfo_PlaneConfig as PlaneConfig;
+variant_name!(PlaneConfig::YUV);
 
 /// UV subsampling is also specified in the enum value names using J:a:b notation (e.g. 4:2:0 is
 /// 1/2 horizontal and 1/2 vertical resolution for U and V). If alpha is present it is not sub-
-/// sampled. Note that Subsampling values other than k444 are only valid with [PlaneConfig] values
-/// that have U and V in different planes than Y (and A, if present).
+/// sampled. Note that Subsampling values other than k444 are only valid with [`PlaneConfig`] values
+/// that have U and V in different planes than Y (and A, if present), with the exception of
+/// `PlaneConfig::YUYV` which represents packed 4:2:2 and is only valid with
+/// [`Subsampling::S422`].
 #[repr(i32)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Subsampling {
@@ -45,22 +49,24 @@ pub enum Subsampling {
     S410 = SkYUVAInfo_Subsampling::k410 as _,
 }
 
-impl NativeTransmutable<SkYUVAInfo_Subsampling> for Subsampling {}
+native_transmutable!(SkYUVAInfo_Subsampling, Subsampling);
 
 /// Describes how subsampled chroma values are sited relative to luma values.
 ///
 /// Currently only centered siting is supported but will expand to support additional sitings.
 pub use sb::SkYUVAInfo_Siting as Siting;
+variant_name!(Siting::Centered);
 
 /// Ratio of Y/A values to U/V values in x and y.
 pub fn subsampling_factors(subsampling: Subsampling) -> (i32, i32) {
     let mut factors: [i32; 2] = Default::default();
     unsafe { sb::C_SkYUVAInfo_SubsamplingFactors(subsampling.into_native(), &mut factors[0]) };
+    #[allow(clippy::tuple_array_conversions)]
     (factors[0], factors[1])
 }
 
 /// `SubsamplingFactors(Subsampling)` if `plane_index` refers to a U/V plane and otherwise `(1, 1)`
-/// if inputs are valid. Invalid inputs consist of incompatible [PlaneConfig] [Subsampling]
+/// if inputs are valid. Invalid inputs consist of incompatible [`PlaneConfig`] [`Subsampling`]
 /// `plane_index` combinations. `(0, 0)` is returned for invalid inputs.
 pub fn plane_subsampling_factors(
     plane: PlaneConfig,
@@ -76,6 +82,7 @@ pub fn plane_subsampling_factors(
             &mut factors[0],
         )
     };
+    #[allow(clippy::tuple_array_conversions)]
     (factors[0], factors[1])
 }
 
@@ -105,24 +112,24 @@ pub fn plane_dimensions(
     plane_dimensions[0..size].to_vec()
 }
 
-/// Number of planes for a given [PlaneConfig].
+/// Number of planes for a given [`PlaneConfig`].
 pub fn num_planes(config: PlaneConfig) -> usize {
     unsafe { sb::C_SkYUVAInfo_NumPlanes(config) }
         .try_into()
         .unwrap()
 }
 
-/// Number of Y, U, V, A channels in the ith plane for a given [PlaneConfig] (or [None] if i is
+/// Number of Y, U, V, A channels in the ith plane for a given [`PlaneConfig`] (or `None` if i is
 /// invalid).
 pub fn num_channels_in_plane(config: PlaneConfig, i: usize) -> Option<usize> {
-    (i < num_planes(config)).if_true_then_some(|| {
+    (i < num_planes(config)).then(|| {
         unsafe { sb::C_SkYUVAInfo_NumChannelsInPlane(config, i.try_into().unwrap()) }
             .try_into()
             .unwrap()
     })
 }
 
-/// Does the [PlaneConfig] have alpha values?
+/// Does the [`PlaneConfig`] have alpha values?
 pub fn has_alpha(config: PlaneConfig) -> bool {
     unsafe { sb::SkYUVAInfo_HasAlpha(config) }
 }
@@ -135,7 +142,7 @@ impl Default for YUVAInfo {
 
 impl NativePartialEq for YUVAInfo {
     fn eq(&self, rhs: &Self) -> bool {
-        unsafe { sb::C_SkYUVAInfo_equals(self.native(), rhs.native()) }
+        unsafe { sb::C_SkYUVAInfo_Equals(self.native(), rhs.native()) }
     }
 }
 
@@ -181,7 +188,7 @@ impl YUVAInfo {
                 siting_y,
             )
         };
-        Self::native_is_valid(&n).if_true_then_some(|| Self::from_native_c(n))
+        Self::native_is_valid(&n).then(|| Self::from_native_c(n))
     }
 
     pub fn plane_config(&self) -> PlaneConfig {
@@ -224,7 +231,11 @@ impl YUVAInfo {
     }
 
     pub fn origin_matrix(&self) -> Matrix {
-        self.origin().to_matrix((self.width(), self.height()))
+        self.origin().to_matrix(self.dimensions())
+    }
+
+    pub fn inverse_origin_matrix(&self) -> Matrix {
+        self.origin().to_matrix_inverse(self.dimensions())
     }
 
     pub fn has_alpha(&self) -> bool {
@@ -268,47 +279,27 @@ impl YUVAInfo {
         num_channels_in_plane(self.plane_config(), i)
     }
 
-    /// Returns a [YUVAInfo] that is identical to this one but with the passed [Subsampling]. If the
-    /// passed [Subsampling] is not [Subsampling::S444] and this info's [PlaneConfig] is not
+    /// Returns a [`YUVAInfo`] that is identical to this one but with the passed [`Subsampling`]. If the
+    /// passed [`Subsampling`] is not [`Subsampling::S444`] and this info's [`PlaneConfig`] is not
     /// compatible with chroma subsampling (because Y is in the same plane as UV) then the result
     /// will be `None`.
     pub fn with_subsampling(&self, subsampling: Subsampling) -> Option<Self> {
-        Self::try_construct(|info| unsafe {
-            sb::C_SkYUVAInfo_makeSubsampling(self.native(), subsampling.into_native(), info);
-            Self::native_is_valid(&*info)
-        })
+        let r = construct(|info| unsafe {
+            sb::C_SkYUVAInfo_makeSubsampling(self.native(), subsampling.into_native(), info)
+        });
+        Self::native_is_valid(&r).then(|| Self::from_native_c(r))
     }
 
-    /// Returns a [YUVAInfo] that is identical to this one but with the passed dimensions. If the
+    /// Returns a [`YUVAInfo`] that is identical to this one but with the passed dimensions. If the
     /// passed dimensions is empty then the result will be `None`.
     pub fn with_dimensions(&self, dimensions: impl Into<ISize>) -> Option<Self> {
-        Self::try_construct(|info| unsafe {
+        let r = construct(|info| unsafe {
             sb::C_SkYUVAInfo_makeDimensions(self.native(), dimensions.into().native(), info);
-            Self::native_is_valid(&*info)
-        })
+        });
+        Self::native_is_valid(&r).then(|| Self::from_native_c(r))
     }
 
     pub(crate) fn native_is_valid(info: &SkYUVAInfo) -> bool {
         info.fPlaneConfig != PlaneConfig::Unknown
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::prelude::NativeTransmutable;
-
-    #[test]
-    fn test_plane_config_naming() {
-        let _ = super::PlaneConfig::Y_U_V;
-    }
-
-    #[test]
-    fn test_subsampling_layout() {
-        super::Subsampling::test_layout();
-    }
-
-    #[test]
-    fn test_siting_naming() {
-        let _ = super::Siting::Centered;
     }
 }

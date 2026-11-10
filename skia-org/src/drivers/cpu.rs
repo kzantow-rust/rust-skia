@@ -1,12 +1,13 @@
-use crate::artifact;
-use crate::drivers::DrawingDriver;
-use skia_safe::{Canvas, Surface};
 use std::path::Path;
+
+use skia_safe::{Canvas, surfaces};
+
+use crate::{Driver, artifact, drivers::DrawingDriver};
 
 pub struct Cpu;
 
 impl DrawingDriver for Cpu {
-    const NAME: &'static str = "cpu";
+    const DRIVER: Driver = Driver::Cpu;
 
     fn new() -> Self {
         Self
@@ -17,9 +18,9 @@ impl DrawingDriver for Cpu {
         (width, height): (i32, i32),
         path: &Path,
         name: &str,
-        func: impl Fn(&mut Canvas),
+        func: impl Fn(&Canvas),
     ) {
-        let mut surface = Surface::new_raster_n32_premul((width * 2, height * 2)).unwrap();
+        let mut surface = surfaces::raster_n32_premul((width * 2, height * 2)).unwrap();
         artifact::draw_image_on_surface(&mut surface, path, name, func);
     }
 }

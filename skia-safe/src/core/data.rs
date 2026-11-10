@@ -1,27 +1,29 @@
-use crate::prelude::*;
-use skia_bindings as sb;
-use skia_bindings::SkData;
 use std::{
-    ffi::{CStr, CString},
-    fmt,
+    ffi::{CStr, CString, c_void},
+    fmt, io,
     ops::Deref,
+    path::Path,
 };
 
+use skia_bindings::{self as sb, SkData};
+
+use crate::{interop::RustStream, prelude::*};
+
 pub type Data = RCHandle<SkData>;
-unsafe impl Send for Data {}
-unsafe impl Sync for Data {}
+unsafe_send_sync!(Data);
+require_base_type!(SkData, sb::SkNVRefCnt);
 
 impl NativeRefCounted for SkData {
-    fn _ref(&self) {
-        unsafe { sb::C_SkData_ref(self) }
+    unsafe fn _ref(ptr: *const Self) {
+        unsafe { sb::C_SkData_ref(ptr) }
     }
 
-    fn _unref(&self) {
-        unsafe { sb::C_SkData_unref(self) }
+    unsafe fn _unref(ptr: *const Self) {
+        unsafe { sb::C_SkData_unref(ptr) }
     }
 
-    fn unique(&self) -> bool {
-        unsafe { sb::C_SkData_unique(self) }
+    unsafe fn unique(ptr: *const Self) -> bool {
+        unsafe { sb::C_SkData_unique(ptr) }
     }
 }
 
@@ -32,11 +34,17 @@ impl Deref for Data {
     }
 }
 
+impl AsRef<[u8]> for Data {
+    fn as_ref(&self) -> &[u8] {
+        self.deref()
+    }
+}
+
 impl PartialEq for Data {
     // Although there is an implementation in SkData for equality testing, we
     // prefer to stay on the Rust side for that.
     fn eq(&self, other: &Self) -> bool {
-        self.deref().eq(other.deref())
+        self.deref() == other.deref()
     }
 }
 
@@ -48,7 +56,7 @@ impl fmt::Debug for Data {
 
 impl Data {
     pub fn size(&self) -> usize {
-        self.native().fSize
+        self.native().fSpan.fSize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -56,7 +64,7 @@ impl Data {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { safer::from_raw_parts(self.native().fPtr as _, self.size()) }
+        unsafe { safer::from_raw_parts(self.native().fSpan.fPtr as _, self.size()) }
     }
 
     // TODO:
@@ -65,6 +73,12 @@ impl Data {
     pub fn copy_range(&self, offset: usize, buffer: &mut [u8]) -> &Self {
         buffer.copy_from_slice(&self.as_bytes()[offset..offset + buffer.len()]);
         self
+    }
+
+    /// Returns data that shares a subset of this data's storage without copying it.
+    /// Returns `None` when `offset + length` exceeds this data's size.
+    pub fn share_subset(&self, offset: usize, length: usize) -> Option<Self> {
+        Self::from_ptr(unsafe { sb::C_SkData_shareSubset(self.native(), offset, length) })
     }
 
     // TODO: rename to copy_from() ? or from_bytes()?
@@ -78,12 +92,41 @@ impl Data {
     /// Users must make sure that the underlying slice will outlive the lifetime of the Data.
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn new_bytes(data: &[u8]) -> Self {
-        Data::from_ptr(sb::C_SkData_MakeWithoutCopy(data.as_ptr() as _, data.len())).unwrap()
+        unsafe {
+            Data::from_ptr(sb::C_SkData_MakeWithoutCopy(data.as_ptr() as _, data.len())).unwrap()
+        }
+    }
+
+    /// Constructs Data that references the bytes of `owner` without copying them.
+    ///
+    /// `owner` is moved to the heap and kept alive until the last reference to the returned
+    /// Data (including references held internally by Skia) is released. It is then dropped,
+    /// possibly on a different thread.
+    pub fn new_with_owner<T: AsRef<[u8]> + Send + 'static>(owner: T) -> Self {
+        unsafe extern "C" fn release<T>(_ptr: *const c_void, context: *mut c_void) {
+            drop(unsafe { Box::from_raw(context as *mut T) });
+        }
+
+        let owner = Box::into_raw(Box::new(owner));
+        let bytes = unsafe { (*owner).as_ref() };
+        Data::from_ptr(unsafe {
+            sb::C_SkData_MakeWithProc(
+                bytes.as_ptr() as _,
+                bytes.len(),
+                Some(release::<T>),
+                owner as _,
+            )
+        })
+        .unwrap()
     }
 
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn new_uninitialized(length: usize) -> Data {
-        Data::from_ptr(sb::C_SkData_MakeUninitialized(length)).unwrap()
+        unsafe { Data::from_ptr(sb::C_SkData_MakeUninitialized(length)).unwrap() }
+    }
+
+    pub fn new_zero_initialized(length: usize) -> Data {
+        Data::from_ptr(unsafe { sb::C_SkData_MakeZeroInitialized(length) }).unwrap()
     }
 
     // TODO: use Range as stand in for offset / length?
@@ -93,9 +136,9 @@ impl Data {
 
     /// Constructs Data from a copy of a &str.
     ///
-    /// Functions that use Data as a string container usually expect it to contain
-    /// a c-string including the terminating 0 byte, so this function converts
-    /// the string to a CString and forwards it to new_cstr().
+    /// Functions that use `Data` as a string container usually expect it to contain a c-string
+    /// including the terminating 0 byte, so this function converts the Rust `str` to a `CString`
+    /// and calls [`Self::new_cstr()`].
     pub fn new_str(str: impl AsRef<str>) -> Data {
         Self::new_cstr(&CString::new(str.as_ref()).unwrap())
     }
@@ -105,9 +148,24 @@ impl Data {
         Data::from_ptr(unsafe { sb::C_SkData_MakeWithCString(cstr.as_ptr()) }).unwrap()
     }
 
-    // TODO: MakeFromFileName (not sure if we need that)
-    // TODO: MakeFromFile (not sure if we need that)
-    // TODO: MakeFromStream
+    /// Create a new `Data` referencing the file with the specified path. If the file cannot be
+    /// opened, the path contains 0 bytes, or the path is not valid UTF-8, this returns `None`.
+    ///
+    /// This function opens the file as a memory mapped file for the lifetime of `Data` returned.
+    pub fn from_filename(path: impl AsRef<Path>) -> Option<Self> {
+        let path = CString::new(path.as_ref().to_str()?).ok()?;
+        Data::from_ptr(unsafe { sb::C_SkData_MakeFromFileName(path.as_ptr()) })
+    }
+
+    // TODO: MakeFromFile (is there a way to wrap this safely?)
+
+    /// Attempt to read size bytes into a [`Data`]. If the read succeeds, return the data,
+    /// else return `None`. Either way the stream's cursor may have been changed as a result
+    /// of calling read().
+    pub fn from_stream(mut stream: impl io::Read, size: usize) -> Option<Self> {
+        let mut stream = RustStream::new(&mut stream);
+        Data::from_ptr(unsafe { sb::C_SkData_MakeFromStream(stream.stream_ptr(), size) })
+    }
 
     pub fn new_empty() -> Self {
         Data::from_ptr(unsafe { sb::C_SkData_MakeEmpty() }).unwrap()
@@ -115,16 +173,116 @@ impl Data {
 }
 
 #[cfg(test)]
-impl RefCount for SkData {
-    fn ref_cnt(&self) -> usize {
-        self._base.ref_cnt()
-    }
-}
+mod tests {
+    use super::*;
 
-#[test]
-fn data_supports_equals() {
-    let x: &[u8] = &[1u8, 2u8, 3u8];
-    let d1 = Data::new_copy(x);
-    let d2 = Data::new_copy(x);
-    assert!(d1 == d2)
+    impl RefCount for SkData {
+        fn ref_cnt(&self) -> usize {
+            self._base.ref_cnt()
+        }
+    }
+
+    #[test]
+    fn data_supports_equals() {
+        let x: &[u8] = &[1u8, 2u8, 3u8];
+        let d1 = Data::new_copy(x);
+        let d2 = Data::new_copy(x);
+        assert!(d1 == d2)
+    }
+
+    #[test]
+    fn share_subset() {
+        let data = Data::new_copy(&[1, 2, 3]);
+        assert_eq!(data.share_subset(1, 2).unwrap().as_bytes(), &[2, 3]);
+        assert!(data.share_subset(2, 2).is_none());
+    }
+
+    #[test]
+    fn from_stream_empty() {
+        let data = [];
+        let cursor = io::Cursor::new(data);
+        let data = Data::from_stream(cursor, 0).unwrap();
+        assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn from_stream() {
+        let data = [1u8];
+        let cursor = io::Cursor::new(data);
+        let data = Data::from_stream(cursor, 1).unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0], 1u8);
+    }
+
+    #[test]
+    fn new_with_owner_shares_bytes_and_drops_owner() {
+        use std::sync::Arc;
+
+        let bytes: Arc<[u8]> = Arc::from(&[1u8, 2, 3][..]);
+        let data = Data::new_with_owner(bytes.clone());
+        assert_eq!(data.as_bytes(), &[1, 2, 3]);
+        assert_eq!(data.as_bytes().as_ptr(), bytes.as_ptr());
+        assert_eq!(Arc::strong_count(&bytes), 2);
+
+        let data2 = data.clone();
+        drop(data);
+        assert_eq!(Arc::strong_count(&bytes), 2);
+        assert_eq!(data2.as_bytes(), &[1, 2, 3]);
+
+        drop(data2);
+        assert_eq!(Arc::strong_count(&bytes), 1);
+    }
+
+    #[test]
+    fn new_with_owner_empty() {
+        let data = Data::new_with_owner(Vec::<u8>::new());
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn data_deref_and_asref() {
+        fn sample(_t: &[u8]) {}
+        fn sample_asref(_t: &(impl AsRef<[u8]> + ?Sized)) {}
+        fn sample_arc_asref(_t: std::sync::Arc<dyn AsRef<[u8]> + Sync + Send>) {}
+        fn sample_rc_asref(_t: std::rc::Rc<dyn AsRef<[u8]>>) {}
+
+        let data = Data::new_str("Test Case");
+
+        // Explicitly calling as_bytes
+        sample(data.as_bytes());
+        sample_asref(data.as_bytes());
+
+        // Passing a reference to the data itself - sample is deduced from Deref but AsRef is not
+        sample(&data);
+        sample_asref(&data);
+
+        // Index access, from Deref
+        let _x = data[0];
+        let _y = &data[0..2];
+
+        // Placing the Data into more common owners - other libraries expose these in their APIs
+        let data_arc = std::sync::Arc::new(data.clone());
+        sample(&data_arc);
+        sample_asref(&*data_arc);
+        sample_arc_asref(data_arc.clone());
+
+        let data_rc = std::rc::Rc::new(data.clone());
+        sample_rc_asref(data_rc.clone());
+
+        // The primary goal of this test case is to ensure that it type checks
+        // however, sanity check the conversions too
+        assert_eq!(data.as_bytes(), &*data);
+
+        let data_as_ref: &[u8] = data.as_ref();
+        assert_eq!(data_as_ref, data.deref());
+
+        let data_as_ref: &[u8] = &data;
+        assert_eq!(data_as_ref, data.as_bytes());
+
+        let data_as_ref: &[u8] = &data_arc;
+        assert_eq!(data_as_ref, data.as_bytes());
+
+        let data_as_ref: &[u8] = &data_rc;
+        assert_eq!(data_as_ref, data.as_bytes());
+    }
 }

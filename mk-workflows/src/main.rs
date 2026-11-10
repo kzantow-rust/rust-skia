@@ -1,14 +1,29 @@
-//! This program builds the github workflow files for the rust-skia project.
-use std::{fmt, fs, iter, ops::Deref, path::PathBuf};
+//! This program generates the github workflows for the rust-skia project.
+
+// Allow uppercase acronyms like QA and MacOS.
+#![allow(clippy::upper_case_acronyms)]
+
+use std::{collections::HashSet, fmt, fs, ops::Sub, path::PathBuf};
+
+use target::Target;
 
 mod config;
+mod target;
 
 const QA_WORKFLOW: &str = include_str!("templates/qa-workflow.yaml");
 const RELEASE_WORKFLOW: &str = include_str!("templates/release-workflow.yaml");
 const LINUX_JOB: &str = include_str!("templates/linux-job.yaml");
+const WASM_JOB: &str = include_str!("templates/wasm-job.yaml");
 const WINDOWS_JOB: &str = include_str!("templates/windows-job.yaml");
+const WINDOWS_ARM_JOB: &str = include_str!("templates/windows-arm-job.yaml");
 const MACOS_JOB: &str = include_str!("templates/macos-job.yaml");
 const TARGET_TEMPLATE: &str = include_str!("templates/target.yaml");
+
+/// The minimum macOS version that every macOS build targets.
+///
+/// Skia's Graphite backend uses C++20 `std::atomic::wait` and `notify_one`, which libc++ makes
+/// available starting with macOS 11.0.
+const MACOSX_DEPLOYMENT_TARGET: &str = "11.0";
 
 fn main() {
     for workflow in config::workflows() {
@@ -22,8 +37,16 @@ pub struct Workflow {
     host_os: HostOS,
     host_target: &'static str,
     job_template: &'static str,
-    targets: Vec<Target>,
+    targets: Vec<TargetConf>,
     host_bin_ext: &'static str,
+}
+
+impl fmt::Display for Workflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(f)?;
+        f.write_str(": ")?;
+        self.host_os.fmt(f)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -45,8 +68,10 @@ impl fmt::Display for WorkflowKind {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum HostOS {
     Windows,
+    WindowsArm,
     Linux,
     MacOS,
+    Wasm,
 }
 
 impl fmt::Display for HostOS {
@@ -54,21 +79,58 @@ impl fmt::Display for HostOS {
         use HostOS::*;
         f.write_str(match self {
             Windows => "windows",
+            WindowsArm => "windows-arm",
             Linux => "linux",
             MacOS => "macos",
+            Wasm => "wasm",
         })
     }
 }
 
-#[derive(Default)]
+/// Specifies the job name.
+pub enum JobName {
+    /// A named job (e.g., "stable-all-features").
+    Named(String),
+    /// An unnamed job for binary releases that uses the workflow name directly.
+    Binaries,
+}
+
+/// Specifies how features are determined for a job.
+pub enum JobFeatures {
+    /// Features are specified directly and combined with target platform features.
+    Direct(Features),
+    /// Features come from a GitHub Actions matrix variable.
+    Matrix(Vec<Features>),
+}
+
+impl Default for JobFeatures {
+    fn default() -> Self {
+        JobFeatures::Direct(Features::default())
+    }
+}
+
 pub struct Job {
-    name: &'static str,
+    name: JobName,
     toolchain: &'static str,
-    features: Features,
+    features: JobFeatures,
     skia_debug: bool,
     // we may need to disable clippy for beta builds temporarily.
     disable_clippy: bool,
     example_args: Option<String>,
+}
+
+impl fmt::Display for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            JobName::Named(name) => f.write_str(name)?,
+            JobName::Binaries => f.write_str("binaries")?,
+        }
+        f.write_str(", features: ")?;
+        match &self.features {
+            JobFeatures::Direct(features) => features.fmt(f),
+            JobFeatures::Matrix(features) => write!(f, "matrix({} variants)", features.len()),
+        }
+    }
 }
 
 fn build_workflow(workflow: &Workflow, jobs: &[Job]) {
@@ -76,11 +138,14 @@ fn build_workflow(workflow: &Workflow, jobs: &[Job]) {
     let job_template = workflow.job_template;
     let targets = &workflow.targets;
 
-    let workflow_name = format!("{}-{}", host_os.to_string(), workflow.kind.to_string());
+    let workflow_name = match workflow.kind {
+        WorkflowKind::Release => format!("{}-binaries", host_os),
+        WorkflowKind::QA => format!("{}-{}", host_os, workflow.kind),
+    };
     let output_filename = PathBuf::new()
         .join(".github")
         .join("workflows")
-        .join(format!("{}.yaml", workflow_name));
+        .join(format!("{workflow_name}.yaml"));
 
     let header = build_header(&workflow_name, workflow.kind);
 
@@ -88,22 +153,21 @@ fn build_workflow(workflow: &Workflow, jobs: &[Job]) {
 
     for job in jobs {
         {
-            let job_name = workflow_name.clone() + "-" + job.name;
-            let job_name = format!("{}:", job_name).indented(1);
+            let job_name = match &job.name {
+                JobName::Binaries => workflow_name.clone(),
+                JobName::Named(name) => workflow_name.clone() + "-" + name,
+            };
+            let job_name = format!("{job_name}:").indented(1);
             parts.push(job_name);
         }
 
         {
-            let job_header = build_job(job_template, &job).indented(2);
+            let job_header = build_job(workflow, job_template, job, targets).indented(2);
             parts.push(job_header);
         }
 
-        let targets: Vec<String> = targets
-            .iter()
-            .map(|t| build_target(&workflow, &job, &t).indented(2))
-            .collect();
-
-        parts.extend(targets);
+        let generic_steps = render_generic_steps(workflow, job).indented(2);
+        parts.push(generic_steps);
     }
 
     // some parts won't end with \n, so be safe and join them with a newline.
@@ -128,44 +192,124 @@ fn build_header(workflow_name: &str, workflow_kind: WorkflowKind) -> String {
     render_template(workflow, &replacements)
 }
 
-fn build_job(template: &str, job: &Job) -> String {
+fn build_job(workflow: &Workflow, template: &str, job: &Job, targets: &[TargetConf]) -> String {
     let skia_debug = if job.skia_debug { "1" } else { "0" };
 
-    let replacements = [
+    let mut replacements = vec![
         ("rustToolchain".into(), job.toolchain.into()),
         ("skiaDebug".into(), skia_debug.into()),
     ];
-    render_template(template, &replacements)
+
+    if let Some(macosx_deployment_target) = macosx_deployment_target(workflow) {
+        replacements.push((
+            "macosxDeploymentTarget".into(),
+            macosx_deployment_target.into(),
+        ))
+    }
+
+    let mut rendered = render_template(template, &replacements);
+
+    let mut matrix_lines = Vec::new();
+    matrix_lines.push("strategy:".to_string());
+    matrix_lines.push("  fail-fast: false".to_string());
+    matrix_lines.push("  matrix:".to_string());
+
+    if let JobFeatures::Matrix(features) = &job.features {
+        matrix_lines.push(format!(
+            "    features: {:?}",
+            features.iter().map(|f| f.to_string()).collect::<Vec<_>>()
+        ));
+    }
+
+    let target_names: Vec<String> = targets.iter().map(|t| t.target.to_string()).collect();
+    matrix_lines.push(format!("    target: {:?}", target_names));
+
+    matrix_lines.push("    include:".to_string());
+    for target in targets {
+        let android_env = target.android_env();
+        let emscripten_env = target.emscripten_env();
+        let native_target = workflow.host_target == target.target.to_string();
+        let run_clippy = native_target && !job.disable_clippy && !emscripten_env;
+        let run_tests = native_target && !emscripten_env;
+        let example_args = if native_target {
+            job.example_args.clone()
+        } else {
+            None
+        }
+        .unwrap_or_default();
+        let generate_artifacts = !example_args.is_empty();
+
+        matrix_lines.push(format!("      - target: {}", target.target));
+        matrix_lines.push(format!("        androidEnv: {}", android_env));
+        matrix_lines.push(format!("        emscriptenEnv: {}", emscripten_env));
+        matrix_lines.push(format!("        runClippy: {}", run_clippy));
+        matrix_lines.push(format!("        runTests: {}", run_tests));
+        matrix_lines.push(format!("        exampleArgs: '{}'", example_args));
+        matrix_lines.push(format!("        generateArtifacts: {}", generate_artifacts));
+        if let JobFeatures::Direct(features) = &job.features {
+            let effective_features = effective_features(workflow, features, target).to_string();
+            matrix_lines.push(format!("        features: '{}'", effective_features));
+        }
+    }
+
+    if let JobFeatures::Matrix(features_list) = &job.features {
+        let mut excludes = Vec::new();
+        for features in features_list {
+            for target in targets {
+                let mut disabled = false;
+                for f in &features.0 {
+                    if target.disabled_features.contains(f) {
+                        disabled = true;
+                        break;
+                    }
+                }
+                if disabled {
+                    excludes.push((target.target.to_string(), features.clone()));
+                }
+            }
+        }
+
+        if !excludes.is_empty() {
+            matrix_lines.push("    exclude:".to_string());
+            for (t, f) in excludes {
+                matrix_lines.push(format!("      - target: {}", t));
+                matrix_lines.push(format!("        features: '{}'", f));
+            }
+        }
+    }
+
+    let strategy = matrix_lines.join("\n");
+    rendered = format!("{}\n{}", strategy, rendered);
+
+    rendered
 }
 
-fn build_target(workflow: &Workflow, job: &Job, target: &Target) -> String {
-    let mut features = job.features.clone();
-    // if we are releasing binaries, we want the exact set of features specified.
-    if workflow.kind == WorkflowKind::QA {
-        features = features.join(&target.platform_features);
+fn macosx_deployment_target(workflow: &Workflow) -> Option<&'static str> {
+    match workflow.host_os {
+        HostOS::MacOS => Some(MACOSX_DEPLOYMENT_TARGET),
+        _ => None,
     }
-    let native_target = workflow.host_target == target.target;
-    let example_args = if native_target {
-        job.example_args.clone()
-    } else {
-        None
-    }
-    .unwrap_or_default();
-    let generate_artifacts = !example_args.is_empty();
-    let run_clippy = native_target && !job.disable_clippy;
+}
+
+fn render_generic_steps(workflow: &Workflow, _job: &Job) -> String {
     let release_binaries = workflow.kind == WorkflowKind::Release;
 
-    let template_arguments: &[(&'static str, &dyn fmt::Display)] = &[
-        ("target", &target.target),
-        ("androidEnv", &target.android_env),
-        ("androidAPILevel", &config::DEFAULT_ANDROID_API_LEVEL),
-        ("features", &features),
-        ("runTests", &native_target),
-        ("runClippy", &run_clippy),
-        ("exampleArgs", &example_args),
-        ("generateArtifacts", &generate_artifacts),
-        ("releaseBinaries", &release_binaries),
-        ("hostBinExt", &workflow.host_bin_ext),
+    let template_arguments: &[(&'static str, &str)] = &[
+        ("target", "${{ matrix.target }}"),
+        ("androidEnv", "${{ matrix.androidEnv }}"),
+        ("emscriptenEnv", "${{ matrix.emscriptenEnv }}"),
+        (
+            "androidAPILevel",
+            &config::DEFAULT_ANDROID_API_LEVEL.to_string(),
+        ),
+        ("features", "${{ matrix.features }}"),
+        ("runTests", "${{ matrix.runTests }}"),
+        ("runClippy", "${{ matrix.runClippy }}"),
+        ("exampleArgs", "${{ matrix.exampleArgs }}"),
+        ("generateArtifacts", "${{ matrix.generateArtifacts }}"),
+        ("releaseBinaries", &release_binaries.to_string()),
+        ("hostBinExt", workflow.host_bin_ext),
+        ("stepIf", "true"),
     ];
 
     let replacements: Vec<(String, String)> = template_arguments
@@ -176,69 +320,124 @@ fn build_target(workflow: &Workflow, job: &Job, target: &Target) -> String {
     render_template(TARGET_TEMPLATE, &replacements)
 }
 
+fn effective_features(workflow: &Workflow, features: &Features, target: &TargetConf) -> Features {
+    let mut features = features.clone();
+    // if we are releasing binaries, we want the exact set of features specified.
+    if workflow.kind == WorkflowKind::QA {
+        features = features.join(&target.platform_features);
+    }
+    features.sub(&target.disabled_features)
+}
+
 fn render_template(template: &str, replacements: &[(String, String)]) -> String {
     let mut template = template.to_owned();
 
     replacements.iter().for_each(|(pattern, value)| {
-        template = template.replace(&format!("$[[{}]]", pattern), value)
+        template = template.replace(&format!("$[[{pattern}]]"), value)
     });
 
-    if template.contains("$[[") {
-        panic!(
-            "Template contains template patterns after replacement: \n{}",
-            template
-        );
-    }
+    assert!(
+        !template.contains("$[["),
+        "Template contains template patterns after replacement: \n{template}"
+    );
 
     template
 }
 
-#[derive(Clone, Default, Debug)]
-struct Target {
-    target: &'static str,
-    android_env: bool,
+#[derive(Clone, Debug)]
+struct TargetConf {
+    target: Target,
+    /// Platform specific features.
     platform_features: Features,
+    /// Features currently disabled for some reason.
+    disabled_features: Features,
 }
 
-#[derive(Clone, Default, Debug)]
-struct Features(Vec<String>);
-
-impl Features {
-    pub fn join(&self, other: &Self) -> Self {
-        let mut features = self.0.clone();
-        features.extend(other.0.iter().cloned());
-        features.sort();
-        features.dedup();
-        Self(features)
+impl fmt::Display for TargetConf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.target.fmt(f)
     }
 }
 
-impl Deref for Features {
-    type Target = Vec<String>;
+impl TargetConf {
+    pub fn new(target: impl AsRef<str>, platform_features: impl Into<Features>) -> Self {
+        Self {
+            target: target.as_ref().parse().unwrap(),
+            platform_features: platform_features.into(),
+            disabled_features: Features::default(),
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub fn disable(mut self, disabled_features: impl Into<Features>) -> Self {
+        self.disabled_features = disabled_features.into();
+        self
+    }
+
+    pub fn android_env(&self) -> bool {
+        self.target.is_android()
+    }
+
+    pub fn emscripten_env(&self) -> bool {
+        self.target.is_emscripten()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Features(HashSet<String>);
+
+impl Features {
+    #[must_use]
+    pub fn join(&self, other: &Self) -> Self {
+        let mut features = self.0.clone();
+        features.extend(other.0.iter().cloned());
+        Self(features)
+    }
+
+    #[must_use]
+    pub fn sub(&mut self, other: &Self) -> Self {
+        Self(self.0.sub(&other.0))
+    }
+
+    pub fn contains(&self, feature: impl AsRef<str>) -> bool {
+        self.0.contains(feature.as_ref())
+    }
+
+    /// Create a stable, comparable name for a feature combination, separated by a separator.
+    pub fn name(&self, separator: &str) -> String {
+        let mut strings: Vec<_> = self.0.iter().map(|s| s.as_str()).collect();
+        strings.sort();
+        strings.join(separator)
     }
 }
 
 impl fmt::Display for Features {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        let features = self.0.join(",");
-        f.write_str(&features)
+        f.write_str(&self.name(","))
+    }
+}
+
+impl Ord for Features {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .len()
+            .cmp(&other.0.len())
+            .then_with(|| self.name(",").cmp(&other.name(",")))
+    }
+}
+
+impl PartialOrd for Features {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 impl From<&str> for Features {
     fn from(s: &str) -> Self {
-        let strs: Vec<String> = s
+        let strs: HashSet<String> = s
             .split(',')
             .filter_map(|s| {
                 let f = s.trim().to_owned();
-                if !f.is_empty() {
-                    Some(f)
-                } else {
-                    None
-                }
+                if !f.is_empty() { Some(f) } else { None }
             })
             .collect();
         Features(strs)
@@ -251,8 +450,17 @@ trait Indented {
 
 impl Indented for String {
     fn indented(&self, i: usize) -> String {
-        let prefix: String = iter::repeat("  ").take(i).collect();
-        let indented_lines: Vec<String> = self.lines().map(|l| prefix.clone() + l).collect();
+        let prefix: String = "  ".repeat(i);
+        let indented_lines: Vec<String> = self
+            .lines()
+            .map(|l| {
+                if !l.is_empty() {
+                    prefix.clone() + l
+                } else {
+                    "".into()
+                }
+            })
+            .collect();
 
         indented_lines.join("\n")
     }

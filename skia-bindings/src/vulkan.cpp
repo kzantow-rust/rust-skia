@@ -1,51 +1,92 @@
-#ifndef SK_VULKAN
-    #define SK_VULKAN
+#include "include/core/SkContext.h"
+#include "include/gpu/MutableTextureState.h"
+#if defined(SK_GANESH)
+#include "include/gpu/ganesh/vk/GrBackendDrawableInfo.h"
+#include "include/gpu/ganesh/GrBackendSemaphore.h"
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
+#include "include/gpu/ganesh/vk/GrVkBackendSemaphore.h"
+#include "include/gpu/ganesh/vk/GrVkBackendSurface.h"
+#include "include/gpu/ganesh/vk/GrVkDirectContext.h"
+#include "include/gpu/ganesh/vk/GrVkTypes.h"
 #endif
+#include "include/gpu/vk/VulkanBackendContext.h"
+#include "include/gpu/vk/VulkanExtensions.h"
+#include "include/gpu/vk/VulkanMutableTextureState.h"
+#include "include/gpu/vk/VulkanTypes.h"
+#include "src/gpu/GpuTypesPriv.h"
+#include "src/gpu/vk/vulkanmemoryallocator/VulkanMemoryAllocatorPriv.h"
 
-#include "include/gpu/GrBackendDrawableInfo.h"
-#include "include/gpu/GrBackendSurface.h"
-#include "include/gpu/GrDirectContext.h"
-#include "include/gpu/vk/GrVkVulkan.h"
-#include "include/gpu/vk/GrVkTypes.h"
-#include "include/gpu/vk/GrVkBackendContext.h"
-#include "include/gpu/vk/GrVkExtensions.h"
+#if defined(SK_GANESH)
+// Additional Ganesh types not referenced.
+extern "C" void C_GrVkTypes(GrVkSurfaceInfo*, VkQueue*, VkPhysicalDevice*) {};
 
-extern "C" void C_GrBackendFormat_ConstructVk(GrBackendFormat* uninitialized, VkFormat format) {
-    new(uninitialized)GrBackendFormat(GrBackendFormat::MakeVk(format));
+//
+// gpu/ganesh/vk/GrBackendDrawableInfo.h
+//
+
+extern "C" void C_GrBackendDrawableInfo_Construct(GrBackendDrawableInfo* uninitialized) {
+    new(uninitialized) GrBackendDrawableInfo();
 }
 
-extern "C" void C_GrBackendFormat_ConstructVk2(GrBackendFormat* uninitialized, const GrVkYcbcrConversionInfo* ycbcrInfo) {
-    new(uninitialized)GrBackendFormat(GrBackendFormat::MakeVk(*ycbcrInfo));
+extern "C" void C_GrBackendDrawableInfo_Construct2(GrBackendDrawableInfo* uninitialized, const GrVkDrawableInfo* info) {
+    new(uninitialized) GrBackendDrawableInfo(*info);
 }
 
-extern "C" void C_GrBackendTexture_ConstructVk(GrBackendTexture* uninitialized, int width, int height, const GrVkImageInfo* vkInfo) {
-    new(uninitialized)GrBackendTexture(width, height, *vkInfo);
+extern "C" void C_GrBackendDrawableInfo_destruct(GrBackendDrawableInfo* self) {
+    self->~GrBackendDrawableInfo();
 }
 
-extern "C" void C_GrBackendRenderTarget_ConstructVk(GrBackendRenderTarget* uninitialized, int width, int height, int sampleCnt, const GrVkImageInfo* vkInfo) {
-    new(uninitialized)GrBackendRenderTarget(width, height, sampleCnt, *vkInfo);
+extern "C" bool C_GrBackendDrawableInfo_isValid(const GrBackendDrawableInfo* self) {
+    return self->isValid();
+}
+
+extern "C" GrBackendApi C_GrBackendDrawableInfo_backend(const GrBackendDrawableInfo* self) {
+    return self->backend();
+}
+
+//
+// gpu/GrBackendSurface.h
+//
+
+extern "C" void C_GrBackendFormat_ConstructVk(GrBackendFormat* uninitialized, VkFormat format, bool willUseDRMFormatModifiers) {
+    new(uninitialized)GrBackendFormat(GrBackendFormats::MakeVk(format, willUseDRMFormatModifiers));
+}
+
+extern "C" void C_GrBackendFormat_ConstructVk2(GrBackendFormat* uninitialized, const skgpu::VulkanYcbcrConversionInfo* ycbcrInfo,  bool willUseDRMFormatModifiers) {
+    new(uninitialized)GrBackendFormat(GrBackendFormats::MakeVk(*ycbcrInfo, willUseDRMFormatModifiers));
+}
+
+extern "C" GrBackendTexture* C_GrBackendTexture_newVk(
+    int width, int height,
+    const GrVkImageInfo* vkInfo,
+    const char* label,
+    size_t labelCount) {
+    return new GrBackendTexture(GrBackendTextures::MakeVk(width, height, *vkInfo, std::string_view(label, labelCount)));
+}
+
+extern "C" void C_GrBackendRenderTargets_ConstructVk(GrBackendRenderTarget* uninitialized, int width, int height, const GrVkImageInfo* vkInfo) {
+    new (uninitialized) GrBackendRenderTarget(GrBackendRenderTargets::MakeVk(width, height, *vkInfo));
 }
 
 extern "C" bool C_GrBackendDrawableInfo_getVkDrawableInfo(const GrBackendDrawableInfo* self, GrVkDrawableInfo* info) {
     return self->getVkDrawableInfo(info);
 }
+#endif
 
-extern "C" void C_GPU_VK_Types(GrVkExtensionFlags *, GrVkFeatureFlags *, VkBuffer *) {}
-
-// The GrVkBackendContext struct binding's length is too short
-// because of the std::function that is used in it.
-// TODO: verify if this is actually true for the latest bindings (it doesn't seem so, because all skia-bindings testcases work and 
-// GrVkBackendContext seems to be generated).
+extern "C" void C_GPU_VK_Types(VkBuffer *) {}
 
 typedef PFN_vkVoidFunction (*GetProcFn)(const char* name, VkInstance instance, VkDevice device);
 typedef const void* (*GetProcFnVoidPtr)(const char* name, VkInstance instance, VkDevice device);
 
-extern "C" void *C_GrVkBackendContext_New(
+extern "C" void *C_VulkanBackendContext_new(
     void *instance,
     void *physicalDevice,
     void *device,
     void *queue,
     uint32_t graphicsQueueIndex,
+    skgpu::Protected protectedContext,
+    uint32_t maxAPIVersion,
 
     /* PFN_vkVoidFunction makes us trouble on the Rust side */
     GetProcFnVoidPtr getProc,
@@ -57,9 +98,9 @@ extern "C" void *C_GrVkBackendContext_New(
     auto vkDevice = static_cast<VkDevice>(device);
     auto vkGetProc = *(reinterpret_cast<GetProcFn *>(&getProc));
 
-    auto &extensions = *new GrVkExtensions();
+    auto &extensions = *new skgpu::VulkanExtensions();
     extensions.init(vkGetProc, vkInstance, vkPhysicalDevice, instanceExtensionCount, instanceExtensions, deviceExtensionCount, deviceExtensions);
-    auto &context = *new GrVkBackendContext();
+    auto &context = *new skgpu::VulkanBackendContext();
     context.fInstance = vkInstance;
     context.fPhysicalDevice = vkPhysicalDevice;
     context.fDevice = vkDevice;
@@ -67,50 +108,144 @@ extern "C" void *C_GrVkBackendContext_New(
     context.fGraphicsQueueIndex = graphicsQueueIndex;
     context.fVkExtensions = &extensions;
     context.fGetProc = vkGetProc;
+    context.fProtectedContext = protectedContext;
+    context.fMaxAPIVersion = maxAPIVersion;
+    // Since Skia m147, fMemoryAllocator is required for Vulkan context creation.
+    // The binding initializes it here so Rust callers do not need to wire one manually.
+    context.fMemoryAllocator = skgpu::VulkanMemoryAllocators::Make(context, skgpu::ThreadSafe::kYes);
     return &context;
 }
 
-extern "C" void C_GrVkBackendContext_Delete(void* vkBackendContext) {
-    auto bc = static_cast<GrVkBackendContext*>(vkBackendContext);
+extern "C" void C_VulkanBackendContext_delete(void* vkBackendContext) {
+    auto bc = static_cast<skgpu::VulkanBackendContext*>(vkBackendContext);
     if (bc) {
         delete bc->fVkExtensions;
     }
     delete bc;
 }
 
-extern "C" void C_GrVkBackendContext_setProtectedContext(GrVkBackendContext *self, GrProtected protectedContext) {
+extern "C" void C_VulkanBackendContext_setProtectedContext(skgpu::VulkanBackendContext *self, skgpu::Protected protectedContext) {
     self->fProtectedContext = protectedContext;
 }
 
-extern "C" void C_GrVkBackendContext_setMaxAPIVersion(GrVkBackendContext *self, uint32_t maxAPIVersion) {
+extern "C" void C_VulkanBackendContext_setMaxAPIVersion(skgpu::VulkanBackendContext *self, uint32_t maxAPIVersion) {
     self->fMaxAPIVersion = maxAPIVersion;
 }
 
-extern "C" GrDirectContext* C_GrDirectContext_MakeVulkan(
-    const GrVkBackendContext* vkBackendContext,
+extern "C" void C_VulkanBackendContext_setDeviceFeatures2(
+    skgpu::VulkanBackendContext *self, const VkPhysicalDeviceFeatures2 *deviceFeatures2) {
+    self->fDeviceFeatures2 = deviceFeatures2;
+}
+
+//
+// VulkanTypes.h
+//
+
+extern "C" bool C_VulkanAlloc_Equals(const skgpu::VulkanAlloc* lhs, const skgpu::VulkanAlloc* rhs) {
+    return *lhs == *rhs;
+}
+
+extern "C" bool C_VulkanYcbcrConversionInfo_Equals(const skgpu::VulkanYcbcrConversionInfo* lhs, const skgpu::VulkanYcbcrConversionInfo* rhs) {
+    return *lhs == *rhs;
+}
+
+#if defined(SK_GANESH)
+extern "C" bool C_GrBackendFormats_AsVkFormat(const GrBackendFormat* format, VkFormat* vkFormat) {
+    return GrBackendFormats::AsVkFormat(*format, vkFormat);
+}
+
+extern "C" const skgpu::VulkanYcbcrConversionInfo* C_GrBackendFormats_GetVkYcbcrConversionInfo(const GrBackendFormat* format) {
+    return GrBackendFormats::GetVkYcbcrConversionInfo(*format);
+}
+
+extern "C" bool C_GrBackendTextures_GetVkImageInfo(const GrBackendTexture* texture, GrVkImageInfo* imageInfo) {
+    return GrBackendTextures::GetVkImageInfo(*texture, imageInfo);
+}
+
+extern "C" void C_GrBackendTextures_SetVkImageLayout(GrBackendTexture* texture, VkImageLayout imageLayout) {
+    GrBackendTextures::SetVkImageLayout(texture, imageLayout);
+}
+
+extern "C" bool C_GrBackendRenderTargets_GetVkImageInfo(const GrBackendRenderTarget* renderTarget, GrVkImageInfo* imageInfo) {
+    return GrBackendRenderTargets::GetVkImageInfo(*renderTarget, imageInfo);
+}
+
+extern "C" void C_GrBackendRenderTargets_SetVkImageLayout(GrBackendRenderTarget* renderTarget, VkImageLayout imageLayout) {
+    GrBackendRenderTargets::SetVkImageLayout(renderTarget, imageLayout);
+}
+
+extern "C" GrDirectContext* C_GrDirectContexts_MakeVulkan(
+    const skgpu::VulkanBackendContext* vkBackendContext,
     const GrContextOptions* options) {
     if (options) {
-        return GrDirectContext::MakeVulkan(*vkBackendContext, *options).release();
+        return GrDirectContexts::MakeVulkan(*vkBackendContext, *options).release();
     }
-    return GrDirectContext::MakeVulkan(*vkBackendContext).release();
+    return GrDirectContexts::MakeVulkan(*vkBackendContext).release();
 }
 
-//
-// GrVkTypes.h
-//
+extern "C" SkContext* C_SkContexts_MakeGaneshVulkan(
+    const skgpu::VulkanBackendContext* backendContext,
+    const SkContextOptions* options) {
+    return SkContexts::MakeGanesh(*backendContext, *options).release();
+}
+#endif
 
-extern "C" bool C_GrVkAlloc_Equals(const GrVkAlloc* lhs, const GrVkAlloc* rhs) {
-    return *lhs == *rhs;
+// MutableTextureState.h
+
+extern "C" skgpu::MutableTextureState* C_MutableTextureStates_ConstructVulkan(VkImageLayout layout, uint32_t queueFamilyIndex) {
+    return new skgpu::MutableTextureState(skgpu::MutableTextureStates::MakeVulkan(layout, queueFamilyIndex));
 }
 
-extern "C" bool C_GrVkYcbcrConversionInfo_Equals(const GrVkYcbcrConversionInfo* lhs, const GrVkYcbcrConversionInfo* rhs) {
-    return *lhs == *rhs;
+extern "C" VkImageLayout C_MutableTextureStates_getVkImageLayout(const skgpu::MutableTextureState* self) {
+    return skgpu::MutableTextureStates::GetVkImageLayout(self);
 }
 
-//
-// gpu/GrBackendSurfaceMutableState.h
-//
-
-extern "C" void C_GrBackendSurfaceMutableState_ConstructVK(GrBackendSurfaceMutableState* uninitialized, VkImageLayout layout, uint32_t queueFamilyIndex) {
-    new(uninitialized)GrBackendSurfaceMutableState(layout, queueFamilyIndex);
+extern "C" uint32_t C_MutableTextureStates_getVkQueueFamilyIndex(const skgpu::MutableTextureState* self) {
+    return skgpu::MutableTextureStates::GetVkQueueFamilyIndex(self);
 }
+
+// VulkanTypes.h
+
+extern "C" void C_VulkanYcbcrConversionInfo_Construct_ExternalFormat(
+    skgpu::VulkanYcbcrConversionInfo* uninitialized, 
+    uint64_t externalFormat,
+    VkSamplerYcbcrModelConversion ycbcrModel,
+    VkSamplerYcbcrRange ycbcrRange,
+    VkChromaLocation xChromaOffset,
+    VkChromaLocation yChromaOffset,
+    VkFilter chromaFilter,
+    VkBool32 forceExplicitReconstruction,
+    VkComponentMapping components,
+    VkFormatFeatureFlags formatFeatures) {
+    new (uninitialized) skgpu::VulkanYcbcrConversionInfo(
+        externalFormat, ycbcrModel, ycbcrRange, xChromaOffset, yChromaOffset, chromaFilter, forceExplicitReconstruction, components, formatFeatures);
+}
+
+extern "C" void C_VulkanYcbcrConversionInfo_Construct_Format(
+    skgpu::VulkanYcbcrConversionInfo* uninitialized, 
+    VkFormat format,
+    VkSamplerYcbcrModelConversion ycbcrModel,
+    VkSamplerYcbcrRange ycbcrRange,
+    VkChromaLocation xChromaOffset,
+    VkChromaLocation yChromaOffset,
+    VkFilter chromaFilter,
+    VkBool32 forceExplicitReconstruction,
+    VkComponentMapping components,
+    VkFormatFeatureFlags formatFeatures) {
+    new (uninitialized) skgpu::VulkanYcbcrConversionInfo(
+        format, ycbcrModel, ycbcrRange, xChromaOffset, yChromaOffset, chromaFilter, forceExplicitReconstruction, components, formatFeatures);
+}
+
+#if defined(SK_GANESH)
+extern "C" void C_GrBackendSemaphore_ConstructVk(
+    GrBackendSemaphore* uninitialized,
+    VkSemaphore semaphore) {
+    new(uninitialized) GrBackendSemaphore(GrBackendSemaphores::MakeVk(semaphore));
+}
+
+extern "C" VkSemaphore C_GrBackendSemaphores_GetVkSemaphore(
+    const GrBackendSemaphore* semaphore) {
+    return GrBackendSemaphores::GetVkSemaphore(*semaphore);
+}
+#endif
+

@@ -1,40 +1,39 @@
-use crate::{
-    font_arguments,
-    font_parameters::VariationAxis,
-    interop::{self, MemoryStream, NativeStreamBase, StreamAsset},
-    prelude::*,
-    Data, FontArguments, FontStyle, GlyphId, Rect, Unichar,
-};
-use skia_bindings::{self as sb, SkRefCntBase, SkTypeface, SkTypeface_LocalizedStrings};
-use std::{ffi, fmt, ptr};
+//! Describes the typeface and style of a font; a [`Typeface`] is used by [`crate::Font`] to draw
+//! text.
 
-pub type FontId = skia_bindings::SkFontID;
+use std::{fmt, io, ptr};
+
+use skia_bindings::{self as sb, SkRefCntBase, SkTypeface, SkTypeface_LocalizedStrings};
+
+use crate::font_arguments;
+use crate::font_parameters::VariationAxis;
+use crate::interop::{self, NativeStreamBase, RustStream, RustWStream, StreamAsset};
+use crate::prelude::*;
+use crate::{
+    Data, EncodedText, FontArguments, FontMgr, FontStyle, FourByteTag, GlyphId, Rect, Unichar,
+};
+
+pub type TypefaceId = skia_bindings::SkTypefaceID;
 pub type FontTableTag = skia_bindings::SkFontTableTag;
 
 pub use skia_bindings::SkTypeface_SerializeBehavior as SerializeBehavior;
-#[test]
-fn test_typeface_serialize_behavior_naming() {
-    let _ = SerializeBehavior::DontIncludeData;
-}
+variant_name!(SerializeBehavior::DontIncludeData);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
+/// Localized family-name entry returned by [`LocalizedStringsIter`].
 pub struct LocalizedString {
     pub string: String,
     pub language: String,
 }
 
+pub type FactoryId = FourByteTag;
+
 pub type Typeface = RCHandle<SkTypeface>;
-unsafe impl Send for Typeface {}
-unsafe impl Sync for Typeface {}
+unsafe_send_sync!(Typeface);
+require_base_type!(SkTypeface, sb::SkWeakRefCnt);
 
 impl NativeRefCountedBase for SkTypeface {
     type Base = SkRefCntBase;
-}
-
-impl Default for Typeface {
-    fn default() -> Self {
-        Typeface::from_ptr(unsafe { sb::C_SkTypeface_MakeDefault() }).unwrap()
-    }
 }
 
 impl fmt::Debug for Typeface {
@@ -43,44 +42,50 @@ impl fmt::Debug for Typeface {
             .field("font_style", &self.font_style())
             .field("is_fixed_pitch", &self.is_fixed_pitch())
             .field("unique_id", &self.unique_id())
-            .field("family_name", &self.family_name())
             .field("bounds", &self.bounds())
             .finish()
     }
 }
 
 impl Typeface {
-    // Canonical new:
-    pub fn new(family_name: impl AsRef<str>, font_style: FontStyle) -> Option<Self> {
-        Self::from_name(family_name, font_style)
-    }
-
+    /// Returns the typeface's intrinsic style attributes.
     pub fn font_style(&self) -> FontStyle {
-        FontStyle::from_native_c(self.native().fStyle)
+        FontStyle::construct(|fs| unsafe { sb::C_SkTypeface_fontStyle(self.native(), fs) })
     }
 
+    /// Returns `true` if [`Self::font_style()`] weight is at least semi-bold.
     pub fn is_bold(&self) -> bool {
-        unsafe { sb::C_SkTypeface_isBold(self.native()) }
+        unsafe { self.native().isBold() }
     }
 
+    /// Returns `true` if [`Self::font_style()`] is not upright.
     pub fn is_italic(&self) -> bool {
-        unsafe { sb::C_SkTypeface_isItalic(self.native()) }
+        unsafe { self.native().isItalic() }
     }
 
+    /// Returns `true` if the typeface claims to be fixed-pitch.
+    ///
+    /// This is a style bit; advance widths may vary even when this returns `true`.
     pub fn is_fixed_pitch(&self) -> bool {
-        self.native().fIsFixedPitch
+        unsafe { self.native().isFixedPitch() }
     }
 
+    /// Returns the design variation coordinates for this typeface.
+    ///
+    /// Returns the number of axes and copies the coordinates if available.
+    /// Returns `None` on error.
     pub fn variation_design_position(
         &self,
     ) -> Option<Vec<font_arguments::variation_position::Coordinate>> {
         unsafe {
-            let r = self.native().getVariationDesignPosition(ptr::null_mut(), 0);
+            let r = sb::C_SkTypeface_getVariationDesignPosition(self.native(), ptr::null_mut(), 0);
             if r != -1 {
                 let mut v = vec![font_arguments::variation_position::Coordinate::default(); r as _];
-                let elements = self
-                    .native()
-                    .getVariationDesignPosition(v.native_mut().as_mut_ptr(), r);
+                let elements = sb::C_SkTypeface_getVariationDesignPosition(
+                    self.native(),
+                    v.native_mut().as_mut_ptr(),
+                    r as _,
+                );
                 assert_eq!(elements, r);
                 Some(v)
             } else {
@@ -89,16 +94,21 @@ impl Typeface {
         }
     }
 
+    /// Returns the design variation parameters for this typeface.
+    ///
+    /// Returns the number of axes and copies the parameters if available.
+    /// Returns `None` on error.
     pub fn variation_design_parameters(&self) -> Option<Vec<VariationAxis>> {
         unsafe {
-            let r = self
-                .native()
-                .getVariationDesignParameters(ptr::null_mut(), 0);
+            let r =
+                sb::C_SkTypeface_getVariationDesignParameters(self.native(), ptr::null_mut(), 0);
             if r != -1 {
                 let mut v = vec![VariationAxis::default(); r as _];
-                let elements = self
-                    .native()
-                    .getVariationDesignParameters(v.native_mut().as_mut_ptr(), r);
+                let elements = sb::C_SkTypeface_getVariationDesignParameters(
+                    self.native(),
+                    v.native_mut().as_mut_ptr(),
+                    r as _,
+                );
                 assert_eq!(elements, r);
                 Some(v)
             } else {
@@ -107,96 +117,173 @@ impl Typeface {
         }
     }
 
-    pub fn unique_id(&self) -> FontId {
+    /// Returns `true` if the typeface is internally being fake-bolded.
+    pub fn is_synthetic_bold(&self) -> bool {
+        unsafe { self.native().isSyntheticBold() }
+    }
+
+    /// Returns `true` if the typeface is internally being fake-obliqued.
+    pub fn is_synthetic_oblique(&self) -> bool {
+        unsafe { self.native().isSyntheticOblique() }
+    }
+
+    /// Returns a 32bit value for this typeface, unique for the underlying font data.
+    /// Will never return 0.
+    pub fn unique_id(&self) -> TypefaceId {
         self.native().fUniqueID
     }
 
-    // TODO: wrap SkTypeface::UniqueID()?
-
+    /// Returns `true` if the two typefaces reference the same underlying font.
+    ///
+    /// `None` does not compare equal to any typeface.
+    ///
+    /// - `face_a` first typeface.
+    /// - `face_b` second typeface.
     // Decided not to support PartialEq instead of this function,
     // because Skia does not support the operator ==.
     pub fn equal(face_a: impl AsRef<Typeface>, face_b: impl AsRef<Typeface>) -> bool {
         unsafe { SkTypeface::Equal(face_a.as_ref().native(), face_b.as_ref().native()) }
     }
 
-    pub fn from_name(family_name: impl AsRef<str>, font_style: FontStyle) -> Option<Typeface> {
-        let family_name = ffi::CString::new(family_name.as_ref()).ok()?;
-        Typeface::from_ptr(unsafe {
-            sb::C_SkTypeface_MakeFromName(family_name.as_ptr(), *font_style.native())
-        })
-    }
-
-    // from_file is unsupported, because it is unclear what the
-    // encoding of the path name is. from_data can be used instead.
-
-    // TODO: MakeFromStream()?
-
-    pub fn from_data(data: impl Into<Data>, index: impl Into<Option<usize>>) -> Option<Typeface> {
-        Typeface::from_ptr(unsafe {
-            sb::C_SkTypeface_MakeFromData(
-                data.into().into_ptr(),
-                index.into().unwrap_or_default().try_into().unwrap(),
-            )
-        })
-    }
-
+    /// Returns a typeface based on this typeface and parameterized by `arguments`.
+    ///
+    /// If `arguments` does not supply a value for some font parameter, the value from this
+    /// typeface is used.
+    ///
+    /// - `arguments` clone parameters to apply.
     pub fn clone_with_arguments(&self, arguments: &FontArguments) -> Option<Typeface> {
         Typeface::from_ptr(unsafe { sb::C_SkTypeface_makeClone(self.native(), arguments.native()) })
     }
 
-    // TODO: serialize(Write)?
+    /// Writes a signature sufficient to reconstruct a typeface referencing the same font.
+    ///
+    /// - `write` destination stream.
+    /// - `behavior` controls whether font data is included.
+    pub fn serialize_stream(&self, mut write: impl io::Write, behavior: SerializeBehavior) {
+        let mut stream = RustWStream::new(&mut write);
+        unsafe { sb::C_SkTypeface_serialize2(self.native(), stream.stream_ptr(), behavior) }
+    }
 
+    /// Returns serialized typeface data.
+    ///
+    /// - `behavior` controls whether font data is included.
     // TODO: return Data as impl Deref<[u8]> / Borrow<[u8]> here?
     pub fn serialize(&self, behavior: SerializeBehavior) -> Data {
         Data::from_ptr(unsafe { sb::C_SkTypeface_serialize(self.native(), behavior) }).unwrap()
     }
 
-    // TODO: Deserialize(Read?)
-
-    pub fn deserialize(data: &[u8]) -> Option<Typeface> {
-        let mut stream = MemoryStream::from_bytes(data);
+    // TODO: Wrap Deserialize(Read?)
+    /// Deserializes a typeface previously produced by [`Self::serialize()`] or
+    /// [`Self::serialize_stream()`].
+    ///
+    /// Goes through all registered typeface factories and `last_resort_mgr` when provided.
+    ///
+    /// - `data` serialized typeface bytes.
+    /// - `last_resort_mgr` optional fallback font manager.
+    pub fn make_deserialize(
+        mut data: impl io::Read,
+        last_resort_mgr: impl Into<Option<FontMgr>>,
+    ) -> Option<Typeface> {
+        let mut stream = RustStream::new(&mut data);
         Typeface::from_ptr(unsafe {
-            sb::C_SkTypeface_MakeDeserialize(stream.native_mut().as_stream_mut())
+            sb::C_SkTypeface_MakeDeserialize(
+                stream.stream_ptr(),
+                last_resort_mgr.into().into_ptr_or_null(),
+            )
         })
     }
 
+    /// Converts UTF-32 code points to glyph IDs.
+    ///
+    /// - `uni` UTF-32 code points.
+    /// - `glyphs` output glyph IDs.
     pub fn unichars_to_glyphs(&self, uni: &[Unichar], glyphs: &mut [GlyphId]) {
-        assert_eq!(uni.len(), glyphs.len());
         unsafe {
-            self.native().unicharsToGlyphs(
+            sb::C_SkTypeface_unicharsToGlyphs(
+                self.native(),
                 uni.as_ptr(),
-                uni.len().try_into().unwrap(),
+                uni.len(),
                 glyphs.as_mut_ptr(),
+                glyphs.len(),
             )
         }
     }
 
+    /// Converts UTF-8 text to glyph IDs.
+    ///
+    /// - `str` input text.
+    /// - `glyphs` output glyph IDs.
+    pub fn str_to_glyphs(&self, str: impl AsRef<str>, glyphs: &mut [GlyphId]) -> usize {
+        self.text_to_glyphs(str.as_ref(), glyphs)
+    }
+
+    /// Converts encoded text to glyph IDs.
+    ///
+    /// - `text` encoded text input.
+    /// - `glyphs` output glyph IDs.
+    pub fn text_to_glyphs(&self, text: impl EncodedText, glyphs: &mut [GlyphId]) -> usize {
+        let (ptr, size, encoding) = text.as_raw();
+        unsafe {
+            sb::C_SkTypeface_textToGlyphs(
+                self.native(),
+                ptr,
+                size,
+                encoding.into_native(),
+                glyphs.as_mut_ptr(),
+                glyphs.len(),
+            )
+        }
+    }
+
+    /// Returns the glyph ID corresponding to a Unicode code point.
+    ///
+    /// Returns `0` when the code point is not supported.
+    ///
+    /// - `unichar` Unicode code point.
     pub fn unichar_to_glyph(&self, unichar: Unichar) -> GlyphId {
         unsafe { self.native().unicharToGlyph(unichar) }
     }
 
+    /// Returns the number of glyphs in the typeface.
     pub fn count_glyphs(&self) -> usize {
         unsafe { self.native().countGlyphs().try_into().unwrap() }
     }
 
+    /// Returns the number of tables in the font.
     pub fn count_tables(&self) -> usize {
         unsafe { self.native().countTables().try_into().unwrap() }
     }
 
+    #[deprecated(since = "0.88.0", note = "use read_table_tags")]
     pub fn table_tags(&self) -> Option<Vec<FontTableTag>> {
-        let mut v: Vec<FontTableTag> = vec![0; self.count_tables()];
-        (unsafe { self.native().getTableTags(v.as_mut_ptr()) } != 0).if_true_some(v)
+        self.read_table_tags()
     }
 
+    /// Returns the list of table tags in the font.
+    ///
+    /// Returns `None` on error.
+    pub fn read_table_tags(&self) -> Option<Vec<FontTableTag>> {
+        let mut v: Vec<FontTableTag> = vec![0; self.count_tables()];
+        (unsafe { sb::C_SkTypeface_readTableTags(self.native(), v.as_mut_ptr(), v.len()) } != 0)
+            .then_some(v)
+    }
+
+    /// Returns the size, in bytes, of table `tag`.
+    ///
+    /// Returns `None` if the table is not present.
+    ///
+    /// - `tag` table tag.
     pub fn get_table_size(&self, tag: FontTableTag) -> Option<usize> {
         let size = unsafe { self.native().getTableSize(tag) };
-        if size != 0 {
-            Some(size)
-        } else {
-            None
-        }
+        if size != 0 { Some(size) } else { None }
     }
 
+    /// Copies table `tag` data into `data`.
+    ///
+    /// Returns the number of bytes copied.
+    ///
+    /// - `tag` table tag.
+    /// - `data` destination buffer.
     pub fn get_table_data(&self, tag: FontTableTag, data: &mut [u8]) -> usize {
         unsafe {
             self.native()
@@ -204,39 +291,56 @@ impl Typeface {
         }
     }
 
+    /// Returns an immutable copy of table `tag` data.
+    ///
+    /// Returns `None` if the table is not found.
+    ///
+    /// - `tag` table tag.
     pub fn copy_table_data(&self, tag: FontTableTag) -> Option<Data> {
         Data::from_ptr(unsafe { sb::C_SkTypeface_copyTableData(self.native(), tag) })
     }
 
+    /// Returns the units-per-em value for this typeface.
+    ///
+    /// Returns `None` on error.
     pub fn units_per_em(&self) -> Option<i32> {
         let units = unsafe { self.native().getUnitsPerEm() };
-        if units != 0 {
-            Some(units)
-        } else {
-            None
-        }
+        if units != 0 { Some(units) } else { None }
     }
 
+    /// Returns horizontal kerning adjustments for `glyphs`.
+    ///
+    /// Adjustments are in design units relative to units-per-em.
+    ///
+    /// - `glyphs` input glyph run.
+    /// - `adjustments` output adjustments; length should be `glyphs.len() - 1`.
     // note: adjustments slice length must be equal to glyph's len - 1.
     pub fn get_kerning_pair_adjustments(
         &self,
         glyphs: &[GlyphId],
         adjustments: &mut [i32],
     ) -> bool {
-        (adjustments.len() + 1 == glyphs.len())
-            && unsafe {
-                self.native().getKerningPairAdjustments(
-                    glyphs.as_ptr(),
-                    glyphs.len().try_into().unwrap(),
-                    adjustments.as_mut_ptr(),
-                )
-            }
+        unsafe {
+            sb::C_SkTypeface_getKerningPairAdjustments(
+                self.native(),
+                glyphs.as_ptr(),
+                glyphs.len(),
+                adjustments.as_mut_ptr(),
+                adjustments.len(),
+            )
+        }
     }
 
+    /// Returns an iterator over all family names specified by the font.
+    ///
+    /// The iterator may borrow backend-owned data. In particular, Fontations-backed
+    /// typefaces expose localized strings through data tied to the typeface, so this
+    /// iterator must not outlive `self`.
     pub fn new_family_name_iterator(&self) -> impl Iterator<Item = LocalizedString> {
         LocalizedStringsIter::from_ptr(unsafe { self.native().createFamilyNameIterator() }).unwrap()
     }
 
+    /// Returns the family name for this typeface as UTF-8.
     pub fn family_name(&self) -> String {
         let mut name = interop::String::default();
         unsafe {
@@ -245,13 +349,30 @@ impl Typeface {
         name.as_str().into()
     }
 
+    /// Returns the PostScript name for this typeface.
+    ///
+    /// The value may vary with variation parameters.
     pub fn post_script_name(&self) -> Option<String> {
         let mut name = interop::String::default();
-        unsafe { self.native().getPostScriptName(name.native_mut()) }
-            .if_true_then_some(|| name.as_str().into())
+        unsafe { self.native().getPostScriptName(name.native_mut()) }.then(|| name.as_str().into())
     }
 
-    pub fn to_font_data(&self) -> Option<(Vec<u8>, usize)> {
+    /// Returns a user-facing name for the primary resource backing this typeface.
+    ///
+    /// Returns `None` when no resource name is available.
+    pub fn resource_name(&self) -> Option<String> {
+        let mut name = interop::String::default();
+        let num_resources = unsafe { self.native().getResourceName(name.native_mut()) };
+        if num_resources == 0 {
+            return None;
+        }
+        Some(name.as_str().into())
+    }
+
+    /// Returns raw font data bytes and the TTC index (or 0 if not a collection).
+    ///
+    /// Returns `None` on failure.
+    pub fn to_font_bytes(&self) -> Option<(Vec<u8>, u32)> {
         let mut ttc_index = 0;
         StreamAsset::from_ptr(unsafe { sb::C_SkTypeface_openStream(self.native(), &mut ttc_index) })
             .and_then(|mut stream| {
@@ -260,22 +381,74 @@ impl Typeface {
                 let stream = stream.native_mut().as_stream_mut();
                 let read =
                     unsafe { sb::C_SkStream_read(stream, data.as_mut_ptr() as _, data.len()) };
-                (read == data.len()).if_true_some((data, ttc_index.try_into().unwrap()))
+                (read == data.len()).then_some((data, ttc_index.try_into().unwrap()))
             })
+    }
+
+    /// Attempts to re-use existing font data when possible, avoiding additional
+    /// memory allocation. If existing font data is not available, the typical
+    /// way to access font data is via tables using `copy_table_data` (or
+    /// `get_table_data`).
+    ///
+    /// Returns a `Data` object which can access the font data and the TTC
+    /// index (or 0 if not a collection).
+    ///
+    /// Returns `None` on failure.
+    pub fn to_existing_font_data(&self) -> Option<(Data, u32)> {
+        let mut ttc_index = 0;
+        let stream = unsafe { sb::C_SkTypeface_openExistingStream(self.native(), &mut ttc_index) };
+        StreamAsset::from_ptr(stream).and_then(|stream| {
+            let data = unsafe { sb::C_SkStreamAsset_getData(stream.native()) };
+            Data::from_ptr_const(data).map(|data| (data, ttc_index.try_into().unwrap()))
+        })
     }
 
     // TODO: createScalerContext()
 
+    /// Returns the union of glyph bounds, scaled to 1pt.
     pub fn bounds(&self) -> Rect {
-        Rect::from_native_c(unsafe { sb::C_SkTypeface_getBounds(self.native()) })
+        Rect::construct(|r| unsafe { sb::C_SkTypeface_getBounds(self.native(), r) })
+    }
+
+    // TODO: Register()
+}
+
+/// A raw CoreText `CTFontRef`.
+///
+/// Cast from or to the `CTFont` type of the CoreText crate of your choice.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "visionos"))]
+pub type CTFontRef = *const std::ffi::c_void;
+
+/// ports/SkTypeface_mac.h
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "visionos"))]
+impl Typeface {
+    /// Returns a new reference to the typeface for the specified `CTFontRef`.
+    ///
+    /// Skia retains `font`; the caller keeps its own reference.
+    ///
+    /// # Safety
+    ///
+    /// `font` must be a valid, non-null `CTFontRef`.
+    pub unsafe fn from_ct_font(font: CTFontRef) -> Option<Typeface> {
+        Typeface::from_ptr(unsafe { sb::C_SkMakeTypefaceFromCTFont(font) })
+    }
+
+    /// Returns the platform-specific `CTFontRef` of this typeface, or `None` if it is not backed
+    /// by CoreText.
+    ///
+    /// The returned reference is borrowed: it is released when this typeface is destroyed, so
+    /// retain it to keep it alive longer.
+    pub fn ct_font(&self) -> Option<CTFontRef> {
+        let font = unsafe { sb::C_SkTypeface_GetCTFontRef(self.native()) };
+        (!font.is_null()).then_some(font)
     }
 }
 
 pub type LocalizedStringsIter = RefHandle<SkTypeface_LocalizedStrings>;
 
-impl NativeDrop for SkTypeface_LocalizedStrings {
-    fn drop(&mut self) {
-        unsafe { sb::C_SkTypeface_LocalizedStrings_unref(self) }
+impl NativeDelete for SkTypeface_LocalizedStrings {
+    unsafe fn delete(ptr: *mut Self) {
+        unsafe { sb::C_SkTypeface_LocalizedStrings_unref(ptr) }
     }
 }
 
@@ -288,17 +461,18 @@ impl fmt::Debug for LocalizedStringsIter {
 impl Iterator for LocalizedStringsIter {
     type Item = LocalizedString;
 
+    /// Returns the next localized family-name entry.
     fn next(&mut self) -> Option<Self::Item> {
         let mut string = interop::String::default();
         let mut language = interop::String::default();
         unsafe {
             sb::C_SkTypeface_LocalizedStrings_next(
-                self.native_mut(),
+                self.native_ptr(),
                 string.native_mut(),
                 language.native_mut(),
             )
         }
-        .if_true_then_some(|| LocalizedString {
+        .then(|| LocalizedString {
             string: string.as_str().into(),
             language: language.as_str().into(),
         })
@@ -307,31 +481,39 @@ impl Iterator for LocalizedStringsIter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use crate::{FontMgr, FontStyle};
+
     use super::{SerializeBehavior, Typeface};
 
     #[test]
     fn serialize_and_deserialize_default_typeface() {
-        let tf = Typeface::default();
+        let tf = FontMgr::new()
+            .legacy_make_typeface(None, FontStyle::normal())
+            .unwrap();
+
         let serialized = tf.serialize(SerializeBehavior::DoIncludeData);
         // On Android, the deserialized typeface name changes from sans-serif to Roboto.
         // (which is probably OK, because Roboto _is_ the default font, so we do another
         // serialization / deserialization and compare the family name with already deserialized
         // one.)
-        let deserialized = Typeface::deserialize(&serialized).unwrap();
+        let deserialized =
+            Typeface::make_deserialize(Cursor::new(serialized.as_bytes()), None).unwrap();
         let serialized2 = deserialized.serialize(SerializeBehavior::DoIncludeData);
-        let deserialized2 = Typeface::deserialize(&serialized2).unwrap();
+        let deserialized2 =
+            Typeface::make_deserialize(Cursor::new(serialized2.as_bytes()), None).unwrap();
 
         // why aren't they not equal?
-        // assert!(Typeface::equal(&tf, &deserialized));
+        assert!(!Typeface::equal(&tf, &deserialized));
         assert_eq!(deserialized.family_name(), deserialized2.family_name());
     }
 
     #[test]
-    fn family_name_iterator_owns_the_strings_and_returns_at_least_one_name_for_the_default_typeface(
-    ) {
-        let tf = Typeface::default();
+    fn family_name_iterator_returns_at_least_one_name_for_the_default_typeface() {
+        let fm = FontMgr::default();
+        let tf = fm.legacy_make_typeface(None, FontStyle::normal()).unwrap();
         let family_names = tf.new_family_name_iterator();
-        drop(tf);
 
         let mut any = false;
         for name in family_names {
@@ -342,9 +524,140 @@ mod tests {
     }
 
     #[test]
-    fn get_font_data_of_default() {
-        let tf = Typeface::default();
-        let (data, _ttc_index) = tf.to_font_data().unwrap();
+    fn get_font_bytes_of_default() {
+        let tf = FontMgr::new()
+            .legacy_make_typeface(None, FontStyle::normal())
+            .unwrap();
+        let (data, _ttc_index) = tf.to_font_bytes().unwrap();
         assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn get_existing_font_data_of_default() {
+        let tf = FontMgr::new()
+            .legacy_make_typeface(None, FontStyle::normal())
+            .unwrap();
+
+        // If the font manager can supply data for the default font check
+        // that it isn't empty - this is a pretty trivial test
+        if let Some((data, _ttc_index)) = tf.to_existing_font_data() {
+            assert!(!data.is_empty());
+        } else {
+            println!("On this platform the default font does not supply existing font data.");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "visionos"))]
+    mod ct_font {
+        use std::ffi::{CString, c_char, c_void};
+
+        use crate::{FontMgr, FontStyle, Typeface};
+
+        type CFTypeRef = *const c_void;
+        const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFStringCreateWithCString(
+                alloc: CFTypeRef,
+                c_str: *const c_char,
+                encoding: u32,
+            ) -> CFTypeRef;
+            fn CFStringGetCString(
+                the_string: CFTypeRef,
+                buffer: *mut c_char,
+                buffer_size: isize,
+                encoding: u32,
+            ) -> u8;
+            fn CFEqual(cf1: CFTypeRef, cf2: CFTypeRef) -> u8;
+            fn CFRelease(cf: CFTypeRef);
+        }
+
+        #[link(name = "CoreText", kind = "framework")]
+        unsafe extern "C" {
+            fn CTFontCreateWithName(name: CFTypeRef, size: f64, matrix: *const c_void)
+            -> CFTypeRef;
+            fn CTFontCopyPostScriptName(font: CFTypeRef) -> CFTypeRef;
+        }
+
+        fn create_ct_font(postscript_name: &str) -> CFTypeRef {
+            let name = CString::new(postscript_name).unwrap();
+            unsafe {
+                let name = CFStringCreateWithCString(
+                    std::ptr::null(),
+                    name.as_ptr(),
+                    K_CF_STRING_ENCODING_UTF8,
+                );
+                assert!(!name.is_null());
+                let font = CTFontCreateWithName(name, 12.0, std::ptr::null());
+                CFRelease(name);
+                assert!(!font.is_null());
+                font
+            }
+        }
+
+        fn postscript_name(font: CFTypeRef) -> String {
+            let mut buffer = [0 as c_char; 256];
+            unsafe {
+                let name = CTFontCopyPostScriptName(font);
+                let ok = CFStringGetCString(
+                    name,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as isize,
+                    K_CF_STRING_ENCODING_UTF8,
+                );
+                CFRelease(name);
+                assert_ne!(ok, 0);
+                std::ffi::CStr::from_ptr(buffer.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        }
+
+        fn round_trip(postscript_name_in: &str, family_name: &str) -> Typeface {
+            let font = create_ct_font(postscript_name_in);
+            // CoreText silently substitutes a fallback for unknown names.
+            assert_eq!(postscript_name(font), postscript_name_in);
+
+            let tf = unsafe { Typeface::from_ct_font(font) }.unwrap();
+            assert_eq!(tf.family_name(), family_name);
+            let tf_font = tf.ct_font().unwrap();
+            assert_ne!(unsafe { CFEqual(tf_font, font) }, 0);
+
+            // Skia keeps its own reference.
+            unsafe { CFRelease(font) };
+            assert_eq!(postscript_name(tf.ct_font().unwrap()), postscript_name_in);
+
+            let tf2 = unsafe { Typeface::from_ct_font(tf_font) }.unwrap();
+            assert!(Typeface::equal(&tf, &tf2));
+            assert_eq!(tf2.ct_font(), Some(tf_font));
+            tf
+        }
+
+        #[test]
+        fn default_typeface_round_trip() {
+            let tf = FontMgr::new()
+                .legacy_make_typeface(None, FontStyle::normal())
+                .unwrap();
+            let font = tf.ct_font().unwrap();
+            let tf2 = unsafe { Typeface::from_ct_font(font) }.unwrap();
+            assert!(Typeface::equal(&tf, &tf2));
+            assert_eq!(tf2.ct_font(), Some(font));
+        }
+
+        #[test]
+        fn named_typeface_round_trip() {
+            let tf = round_trip("Helvetica", "Helvetica");
+            let (data, _) = tf.to_font_bytes().unwrap();
+            assert!(!data.is_empty());
+        }
+
+        /// PingFang SC is a face of a system font collection (PingFang*.ttc).
+        #[test]
+        fn ttc_typeface_round_trip() {
+            let tf = round_trip("PingFangSC-Regular", "PingFang SC");
+            let glyph = tf.unichar_to_glyph('\u{4e2d}' as i32);
+            assert_ne!(glyph, 0);
+        }
     }
 }

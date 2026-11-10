@@ -1,8 +1,10 @@
-use crate::{resources, DrawingDriver};
-use skia_safe::{
-    paint, scalar, BlendMode, Canvas, Color, Font, Paint, Path, RRect, Rect, TextBlob, Typeface,
-};
 use std::path;
+
+use skia_safe::{
+    BlendMode, Canvas, Color, Font, Paint, PathBuilder, RRect, Rect, TextBlob, paint, scalar,
+};
+
+use crate::{DrawingDriver, helper::default_typeface, resources};
 
 pub fn draw(driver: &mut impl DrawingDriver, path: &path::Path) {
     let path = path.join("SkCanvas-Overview");
@@ -11,12 +13,12 @@ pub fn draw(driver: &mut impl DrawingDriver, path: &path::Path) {
     driver.draw_image_256(&path, "hello-skia", draw_hello_skia);
 }
 
-fn draw_heptagram(canvas: &mut Canvas) {
+fn draw_heptagram(canvas: &Canvas) {
     const SCALE: scalar = 256.0;
     const R: scalar = 0.45 * SCALE;
     #[allow(clippy::excessive_precision)]
-    const TAU: scalar = 6.283_185_3;
-    let mut path = Path::default();
+    const TAU: scalar = std::f32::consts::TAU;
+    let mut path = PathBuilder::default();
     path.move_to((R, 0.0));
     for i in 1..7 {
         let theta = 3.0 * (i as scalar) * TAU / 7.0;
@@ -24,6 +26,7 @@ fn draw_heptagram(canvas: &mut Canvas) {
     }
 
     path.close();
+    let path = path.detach();
     let mut p = Paint::default();
     p.set_anti_alias(true);
     canvas
@@ -32,7 +35,7 @@ fn draw_heptagram(canvas: &mut Canvas) {
         .draw_path(&path, &p);
 }
 
-fn draw_rotated_rectangle(canvas: &mut Canvas) {
+fn draw_rotated_rectangle(canvas: &Canvas) {
     canvas.save();
     canvas.translate((128.0, 128.0)).rotate(45.0, None);
     let rect = Rect::from_point_and_size((-90.5, -90.5), (181.0, 181.0));
@@ -42,7 +45,7 @@ fn draw_rotated_rectangle(canvas: &mut Canvas) {
     canvas.restore();
 }
 
-fn draw_hello_skia(canvas: &mut Canvas) {
+fn draw_hello_skia(canvas: &Canvas) {
     let image = resources::color_wheel();
 
     canvas.draw_color(Color::WHITE, BlendMode::default());
@@ -67,10 +70,10 @@ fn draw_hello_skia(canvas: &mut Canvas) {
     paint.set_color(Color::YELLOW);
     canvas.draw_round_rect(rect, 10.0, 10.0, &paint);
 
-    let mut path = Path::default();
+    let mut path = PathBuilder::default();
     path.cubic_to((768.0, 0.0), (-512.0, 256.0), (256.0, 256.0));
     paint.set_color(Color::GREEN);
-    canvas.draw_path(&path, &paint);
+    canvas.draw_path(&path.detach(), &paint);
 
     canvas.draw_image(&image, (128.0, 128.0), Some(&paint));
 
@@ -81,7 +84,7 @@ fn draw_hello_skia(canvas: &mut Canvas) {
 
     let text = TextBlob::from_str(
         "Hello, Skia!",
-        &Font::from_typeface(&Typeface::default(), 18.0),
+        &Font::from_typeface(default_typeface(), 18.0),
     )
     .unwrap();
     canvas.draw_text_blob(&text, (50, 25), &paint2);

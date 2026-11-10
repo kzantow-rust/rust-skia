@@ -4,35 +4,77 @@
 
 #include "bindings.h"
 
+#if defined(SK_GANESH)
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkContext.h"
 #include "include/core/SkSurface.h"
-#include "include/gpu/mtl/GrMtlBackendContext.h"
-#include "include/gpu/GrDirectContext.h"
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
+#include "include/gpu/ganesh/mtl/SkSurfaceMetal.h"
+#include "include/gpu/ganesh/mtl/GrMtlBackendContext.h"
+#include "include/gpu/ganesh/mtl/GrMtlBackendSurface.h"
+#include "include/gpu/ganesh/mtl/GrMtlDirectContext.h"
+
+extern "C" void C_GrMtlTypes(GrMTLTextureUsage*, GrMtlSurfaceInfo *) {};
 
 //
-// core/SkSurface.h
+// gpu/ganesh/mtl/GrMtlBackendSurface.h
 //
 
-extern "C" SkSurface *C_SkSurface_MakeFromCAMetalLayer(GrRecordingContext *context,
-                                                       GrMTLHandle layer,
-                                                       GrSurfaceOrigin origin,
-                                                       int sampleCnt,
-                                                       SkColorType colorType,
-                                                       SkColorSpace *colorSpace,
-                                                       const SkSurfaceProps *surfaceProps,
-                                                       GrMTLHandle *drawable) {
-    return SkSurface::MakeFromCAMetalLayer(context, layer, origin, sampleCnt, colorType, sp(colorSpace), surfaceProps,
-                                           drawable).release();
+extern "C" void C_GrBackendFormats_ConstructMtl(GrBackendFormat* uninitialized, GrMTLPixelFormat format) {
+    new(uninitialized)GrBackendFormat(GrBackendFormats::MakeMtl(format));
 }
 
-extern "C" SkSurface *C_SkSurface_MakeFromMTKView(GrRecordingContext *context,
-                                                  GrMTLHandle mtkView,
-                                                  GrSurfaceOrigin origin,
-                                                  int sampleCnt,
-                                                  SkColorType colorType,
-                                                  SkColorSpace *colorSpace,
-                                                  const SkSurfaceProps *surfaceProps) {
-    return SkSurface::MakeFromMTKView(context, mtkView, origin, sampleCnt, colorType, sp(colorSpace), surfaceProps
-    ).release();
+extern "C" GrMTLPixelFormat C_GrBackendFormats_AsMtlFormat(const GrBackendFormat* backendFormat) {
+    return GrBackendFormats::AsMtlFormat(*backendFormat);
+}
+
+extern "C" GrBackendTexture* C_GrBackendTextures_newMtl(
+    int width, int height,
+    skgpu::Mipmapped mipMapped,
+    const GrMtlTextureInfo* mtlInfo,
+    const char* label,
+    size_t labelCount) {
+    return new GrBackendTexture(GrBackendTextures::MakeMtl(width, height, mipMapped, *mtlInfo, std::string_view(label, labelCount)));
+}
+
+extern "C" bool C_GrBackendTextures_GetMtlTextureInfo(const GrBackendTexture* backendTexture, GrMtlTextureInfo* textureInfo) {
+    return GrBackendTextures::GetMtlTextureInfo(*backendTexture, textureInfo);
+}
+
+extern "C" void C_GrBackendRenderTargets_ConstructMtl(GrBackendRenderTarget* uninitialized, int width, int height, const GrMtlTextureInfo* mtlInfo) {
+    new(uninitialized)GrBackendRenderTarget(GrBackendRenderTargets::MakeMtl(width, height, *mtlInfo));
+}
+
+extern "C" bool C_GrBackendRenderTargets_GetMtlTextureInfo(const GrBackendRenderTarget* target, GrMtlTextureInfo* info) {
+    return GrBackendRenderTargets::GetMtlTextureInfo(*target, info);
+}
+
+//
+// gpu/ganesh/mtl/SkSurfaceMetal.h
+//
+
+extern "C" SkSurface *C_SkSurfaces_WrapCAMetalLayer(
+    GrRecordingContext *context,
+    GrMTLHandle layer,
+    GrSurfaceOrigin origin,
+    int sampleCnt,
+    SkColorType colorType,
+    SkColorSpace *colorSpace,
+    const SkSurfaceProps *surfaceProps,
+    GrMTLHandle *drawable) {
+    return SkSurfaces::WrapCAMetalLayer(context, layer, origin, sampleCnt, colorType, sp(colorSpace), surfaceProps, drawable).release();
+}
+
+extern "C" SkSurface *C_SkSurfaces_WrapMTKView(
+    GrRecordingContext *context,
+    GrMTLHandle mtkView,
+    GrSurfaceOrigin origin,
+    int sampleCnt,
+    SkColorType colorType,
+    SkColorSpace *colorSpace,
+    const SkSurfaceProps *surfaceProps) {
+    return SkSurfaces::WrapMTKView(context, mtkView, origin, sampleCnt, colorType, sp(colorSpace), surfaceProps).release();
 }
 
 //
@@ -45,9 +87,15 @@ extern "C" GrDirectContext *C_GrContext_MakeMetal(
 {
     if (options)
     {
-        return GrDirectContext::MakeMetal(*context, *options).release();
+        return GrDirectContexts::MakeMetal(*context, *options).release();
     }
-    return GrDirectContext::MakeMetal(*context).release();
+    return GrDirectContexts::MakeMetal(*context).release();
+}
+
+extern "C" SkContext* C_SkContexts_MakeGaneshMetal(
+    const GrMtlBackendContext* context,
+    const SkContextOptions* options) {
+    return SkContexts::MakeGanesh(*context, *options).release();
 }
 
 //
@@ -55,12 +103,11 @@ extern "C" GrDirectContext *C_GrContext_MakeMetal(
 //
 
 extern "C" void C_GrMtlBackendContext_Construct(
-    GrMtlBackendContext* unintialized, 
-    const void* device, const void* queue, const void* binaryArchive) {
-    new (unintialized) GrMtlBackendContext();
-    unintialized->fDevice.retain(device);
-    unintialized->fQueue.retain(queue);
-    unintialized->fBinaryArchive.retain(binaryArchive);
+    GrMtlBackendContext* uninitialized,
+    const void* device, const void* queue) {
+    new (uninitialized) GrMtlBackendContext();
+    uninitialized->fDevice.retain(device);
+    uninitialized->fQueue.retain(queue);
 }
 
 extern "C" void C_GrMtlBackendContext_Destruct(GrMtlBackendContext* self) {
@@ -71,9 +118,9 @@ extern "C" void C_GrMtlBackendContext_Destruct(GrMtlBackendContext* self) {
 // gpu/mtl/GrMtlTypes.h
 //
 
-extern "C" void C_GrMtlTextureInfo_Construct(GrMtlTextureInfo* unintialized, const void* texture) {
-    new (unintialized) GrMtlTextureInfo();
-    unintialized->fTexture.retain(texture);
+extern "C" void C_GrMtlTextureInfo_Construct(GrMtlTextureInfo* uninitialized, const void* texture) {
+    new (uninitialized) GrMtlTextureInfo();
+    uninitialized->fTexture.retain(texture);
 }
 
 extern "C" void C_GrMtlTextureInfo_Destruct(GrMtlTextureInfo* self) {
@@ -83,20 +130,4 @@ extern "C" void C_GrMtlTextureInfo_Destruct(GrMtlTextureInfo* self) {
 extern "C" bool C_GrMtlTextureInfo_Equals(const GrMtlTextureInfo* lhs, const GrMtlTextureInfo* rhs) {
     return *lhs == *rhs;
 }
-
-//
-// gpu/GrBackendSurface.h
-//
-
-extern "C" void C_GrBackendFormat_ConstructMtl(GrBackendFormat* uninitialized, GrMTLPixelFormat format) {
-    new(uninitialized)GrBackendFormat(GrBackendFormat::MakeMtl(format));
-}
-
-
-extern "C" void C_GrBackendTexture_ConstructMtl(GrBackendTexture* uninitialized, int width, int height, GrMipMapped mipMapped, const GrMtlTextureInfo* mtlInfo) {
-    new(uninitialized)GrBackendTexture(width, height, mipMapped, *mtlInfo);
-}
-
-extern "C" void C_GrBackendRenderTarget_ConstructMtl(GrBackendRenderTarget* uninitialized, int width, int height, int sampleCnt, const GrMtlTextureInfo* mtlInfo) {
-    new(uninitialized)GrBackendRenderTarget(width, height, sampleCnt, *mtlInfo);
-}
+#endif

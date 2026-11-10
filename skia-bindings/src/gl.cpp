@@ -6,21 +6,19 @@
     #define SK_GL
 #endif
 
-#include "include/core/SkSurfaceCharacterization.h"
-#include "include/gpu/GrDirectContext.h"
-#include "include/gpu/gl/GrGLExtensions.h"
-#include "include/gpu/gl/GrGLInterface.h"
-#include "include/gpu/gl/GrGLAssembleInterface.h"
-#include "src/gpu/gl/GrGLDefines.h"
+#include "include/core/SkContext.h"
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
+#include "include/gpu/ganesh/gl/GrGLDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLMakeWebGLInterface.h"
+#include "include/gpu/ganesh/gl/GrGLExtensions.h"
+#include "include/gpu/ganesh/gl/GrGLInterface.h"
+#include "include/gpu/ganesh/gl/GrGLAssembleInterface.h"
+#include "src/gpu/ganesh/gl/GrGLDefines.h"
 
-// core/SurfaceCharacterization.h
-
-extern "C" void C_SkSurfaceCharacterization_createFBO0(
-    const SkSurfaceCharacterization* self, 
-    bool usesGLFBO0, 
-    SkSurfaceCharacterization* uninitialized) {
-    new(uninitialized) SkSurfaceCharacterization(self->createFBO0(usesGLFBO0));
-}
+// Additional types not yet referenced.
+extern "C" void C_GrGLTypes(GrGLSurfaceInfo *) {};
 
 //
 // GrGLTextureInfo
@@ -60,6 +58,7 @@ extern "C" GrGLFormat C_GrGLFormatFromGLEnum(GrGLenum glFormat) {
         case GR_GL_LUMINANCE16F:         return GrGLFormat::kLUMINANCE16F;
         case GR_GL_R16F:                 return GrGLFormat::kR16F;
         case GR_GL_RGB8:                 return GrGLFormat::kRGB8;
+        case GR_GL_RGBX8:                return GrGLFormat::kRGBX8;
         case GR_GL_RG8:                  return GrGLFormat::kRG8;
         case GR_GL_RGB10_A2:             return GrGLFormat::kRGB10_A2;
         case GR_GL_RGBA4:                return GrGLFormat::kRGBA4;
@@ -93,6 +92,7 @@ extern "C" GrGLenum C_GrGLFormatToEnum(GrGLFormat format) {
         case GrGLFormat::kLUMINANCE16F:         return GR_GL_LUMINANCE16F;
         case GrGLFormat::kR16F:                 return GR_GL_R16F;
         case GrGLFormat::kRGB8:                 return GR_GL_RGB8;
+        case GrGLFormat::kRGBX8:                return GR_GL_RGBX8;
         case GrGLFormat::kRG8:                  return GR_GL_RG8;
         case GrGLFormat::kRGB10_A2:             return GR_GL_RGB10_A2;
         case GrGLFormat::kRGBA4:                return GR_GL_RGBA4;
@@ -154,24 +154,105 @@ extern "C" const GrGLInterface* C_GrGLInterface_MakeAssembledInterface(void *ctx
 extern "C" GrDirectContext* C_GrDirectContext_MakeGL(GrGLInterface* interface, const GrContextOptions* options) {
     if (interface) {
         if (options) {
-            return GrDirectContext::MakeGL(sp(interface), *options).release();
-        } 
-        return GrDirectContext::MakeGL(sp(interface)).release();
-    } 
-    if (options) {
-        return GrDirectContext::MakeGL(*options).release();
+            return GrDirectContexts::MakeGL(sp(interface), *options).release();
+        }
+        return GrDirectContexts::MakeGL(sp(interface)).release();
     }
-    return GrDirectContext::MakeGL().release();
+    if (options) {
+        return GrDirectContexts::MakeGL(*options).release();
+    }
+    return GrDirectContexts::MakeGL().release();
 }
 
-extern "C" void C_GrBackendFormat_ConstructGL(GrBackendFormat* uninitialized, GrGLenum format, GrGLenum target) {
-    new(uninitialized)GrBackendFormat(GrBackendFormat::MakeGL(format, target));
+extern "C" SkContext* C_SkContexts_MakeGaneshGL(
+    GrGLInterface* interface,
+    const SkContextOptions* options) {
+    return SkContexts::MakeGanesh(sp(interface), *options).release();
 }
 
-extern "C" void C_GrBackendTexture_ConstructGL(GrBackendTexture* uninitialized, int width, int height, GrMipMapped mipMapped, const GrGLTextureInfo* glInfo) {
-    new(uninitialized)GrBackendTexture(width, height, mipMapped, *glInfo);
+//
+// gpu/ganesh/gl
+//
+
+extern "C" void C_GrBackendFormats_ConstructGL(GrBackendFormat* uninitialized, GrGLenum format, GrGLenum target) {
+    new (uninitialized) GrBackendFormat(GrBackendFormats::MakeGL(format, target));
 }
 
-extern "C" void C_GrBackendRenderTarget_ConstructGL(GrBackendRenderTarget* uninitialized, int width, int height, int sampleCnt, int stencilBits, const GrGLFramebufferInfo* glInfo) {
-    new(uninitialized)GrBackendRenderTarget(width, height, sampleCnt, stencilBits, *glInfo);
+extern "C" void C_GrBackendFormats_ConstructGLFormat(GrBackendFormat* uninitialized, GrGLenum format) {
+    new (uninitialized) GrBackendFormat(GrBackendFormats::MakeGL(format));
 }
+
+extern "C" void C_GrBackendFormats_ConstructGLExternal(GrBackendFormat* uninitialized) {
+    new (uninitialized) GrBackendFormat(GrBackendFormats::MakeGLExternal());
+}
+
+extern "C" GrGLFormat C_GrBackendFormats_AsGLFormat(const GrBackendFormat* format) {
+    return GrBackendFormats::AsGLFormat(*format);
+}
+
+extern "C" GrGLenum C_GrBackendFormats_AsGLFormatEnum(const GrBackendFormat* format) {
+    return GrBackendFormats::AsGLFormatEnum(*format);
+}
+
+extern "C" GrBackendTexture* C_GrBackendTextures_newGL(
+    int width, int height,
+    skgpu::Mipmapped mipMapped,
+    const GrGLTextureInfo* glInfo,
+    const char* label,
+    size_t labelCount) {
+    return new GrBackendTexture(GrBackendTextures::MakeGL(width, height, mipMapped, *glInfo, std::string_view(label, labelCount)));
+}
+
+extern "C" bool C_GrBackendTextures_GetGLTextureInfo(const GrBackendTexture* texture, GrGLTextureInfo* info) {
+    return GrBackendTextures::GetGLTextureInfo(*texture, info);
+}
+
+extern "C" void C_GrBackendTextures_GLTextureParametersModified(GrBackendTexture* texture) {
+    GrBackendTextures::GLTextureParametersModified(texture);
+}
+
+extern "C" void C_GrBackendRenderTargets_ConstructGL(GrBackendRenderTarget* uninitialized, int width, int height, int sampleCnt, int stencilBits, const GrGLFramebufferInfo* glInfo) {
+    new(uninitialized)GrBackendRenderTarget(GrBackendRenderTargets::MakeGL(width, height, sampleCnt, stencilBits, *glInfo));
+}
+
+extern "C" bool C_GrBackendRenderTargets_GetGLFramebufferInfo(const GrBackendRenderTarget* self, GrGLFramebufferInfo* info) {
+    return GrBackendRenderTargets::GetGLFramebufferInfo(*self, info);
+}
+
+#if SK_ASSUME_WEBGL
+
+extern "C" const GrGLInterface* C_GrGLInterfaces_MakeWebGL() {
+    return GrGLInterfaces::MakeWebGL().release();
+}
+
+#endif
+
+#if defined(SK_BUILD_FOR_IOS)
+
+#include "include/gpu/ganesh/gl/ios/GrGLMakeIOSInterface.h"
+
+extern "C" const GrGLInterface* C_GrGLInterfaces_MakeIOS() {
+    return GrGLInterfaces::MakeIOS().release();
+}
+
+#endif
+
+#if defined(SK_BUILD_FOR_MAC)
+
+#include "include/gpu/ganesh/gl/mac/GrGLMakeMacInterface.h"
+
+extern "C" const GrGLInterface* C_GrGLInterfaces_MakeMac() {
+    return GrGLInterfaces::MakeMac().release();
+}
+
+#endif
+
+#if defined(SK_BUILD_FOR_WIN)
+
+#include "include/gpu/ganesh/gl/win/GrGLMakeWinInterface.h"
+
+extern "C" const GrGLInterface* C_GrGLInterfaces_MakeWin() {
+    return GrGLInterfaces::MakeWin().release();
+}
+
+#endif

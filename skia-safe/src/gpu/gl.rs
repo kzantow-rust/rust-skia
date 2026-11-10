@@ -1,8 +1,4 @@
-mod extensions;
-pub use extensions::*;
+//! OpenGL types and helpers re-exported from the Ganesh GL backend (see
+//! [`crate::gpu::ganesh::gl`]).
 
-mod interface;
-pub use interface::*;
-
-mod types;
-pub use types::*;
+pub use crate::gpu::ganesh::gl::{extensions::*, interface::*, types::*};

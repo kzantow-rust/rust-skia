@@ -1,11 +1,17 @@
-use crate::prelude::*;
-use skia_bindings::{self as sb, SkPixelGeometry, SkSurfaceProps};
 use std::fmt;
 
+use skia_bindings::{self as sb, SkPixelGeometry, SkSurfaceProps};
+
+use crate::{prelude::*, scalar};
+
 // TODO: use the enum rewriter and strip underscores?
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// Description of how the LCD strips are arranged for each pixel. If this is unknown, or the
+/// pixels are meant to be "portable" and/or transformed before showing (e.g. rotated, scaled)
+/// then use [`PixelGeometry::Unknown`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[repr(i32)]
 pub enum PixelGeometry {
+    #[default]
     Unknown = SkPixelGeometry::kUnknown_SkPixelGeometry as _,
     RGBH = SkPixelGeometry::kRGB_H_SkPixelGeometry as _,
     BGRH = SkPixelGeometry::kBGR_H_SkPixelGeometry as _,
@@ -13,11 +19,7 @@ pub enum PixelGeometry {
     BGRV = SkPixelGeometry::kBGR_V_SkPixelGeometry as _,
 }
 
-impl NativeTransmutable<SkPixelGeometry> for PixelGeometry {}
-#[test]
-fn test_pixel_geometry_layout() {
-    PixelGeometry::test_layout()
-}
+native_transmutable!(SkPixelGeometry, PixelGeometry);
 
 impl PixelGeometry {
     pub fn is_rgb(self) -> bool {
@@ -37,16 +39,27 @@ impl PixelGeometry {
     }
 }
 
-impl Default for PixelGeometry {
-    fn default() -> Self {
-        PixelGeometry::Unknown
-    }
-}
-
 bitflags! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SurfacePropsFlags: u32 {
+        #[allow(clippy::unnecessary_cast)]
+        const DEFAULT = sb::SkSurfaceProps_Flags_kDefault_Flag as u32;
+        #[allow(clippy::unnecessary_cast)]
         const USE_DEVICE_INDEPENDENT_FONTS =
             sb::SkSurfaceProps_Flags_kUseDeviceIndependentFonts_Flag as u32;
+        /// Use internal MSAA to render to non-MSAA GPU surfaces.
+        #[allow(clippy::unnecessary_cast)]
+        const DYNAMIC_MSAA =
+            sb::SkSurfaceProps_Flags_kDynamicMSAA_Flag as u32;
+        /// If set, all rendering will have dithering enabled. Currently this only impacts GPU
+        /// backends.
+        #[allow(clippy::unnecessary_cast)]
+        const ALWAYS_DITHER =
+            sb::SkSurfaceProps_Flags_kAlwaysDither_Flag as u32;
+        /// The surface will preserve transparent draws (instead of skipping them).
+        #[allow(clippy::unnecessary_cast)]
+        const PRESERVES_TRANSPARENT_DRAWS =
+            sb::SkSurfaceProps_Flags_kPreservesTransparentDraws_Flag as u32;
     }
 }
 
@@ -56,20 +69,14 @@ impl Default for SurfacePropsFlags {
     }
 }
 
-#[derive(Copy)]
+/// Describes properties and constraints of a given surface. The rendering engine can parse these
+/// during drawing, and can sometimes optimize its performance (e.g. disabling an expensive
+/// feature).
+#[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct SurfaceProps(SkSurfaceProps);
 
-impl NativeTransmutable<SkSurfaceProps> for SurfaceProps {}
-pub fn test_surface_props_layout() {
-    SurfaceProps::test_layout()
-}
-
-impl Clone for SurfaceProps {
-    fn clone(&self) -> Self {
-        Self::from_native_c(unsafe { SkSurfaceProps::new2(self.native()) })
-    }
-}
+native_transmutable!(SkSurfaceProps, SurfaceProps);
 
 impl PartialEq for SurfaceProps {
     fn eq(&self, other: &Self) -> bool {
@@ -90,16 +97,40 @@ impl fmt::Debug for SurfaceProps {
         f.debug_struct("SurfaceProps")
             .field("flags", &self.flags())
             .field("pixel_geometry", &self.pixel_geometry())
+            .field("text_contrast", &self.text_contrast())
+            .field("text_gamma", &self.text_gamma())
             .finish()
     }
 }
 
 impl SurfaceProps {
-    // TODO: do we need to wrap the constructor(s) with InitType?
-
+    /// - `flags` surface properties flags
+    /// - `pixel_geometry` pixel geometry
     pub fn new(flags: SurfacePropsFlags, pixel_geometry: PixelGeometry) -> SurfaceProps {
         Self::from_native_c(unsafe {
             SkSurfaceProps::new1(flags.bits(), pixel_geometry.into_native())
+        })
+    }
+
+    /// Specified pixel geometry, text contrast, and gamma.
+    ///
+    /// - `flags` surface properties flags
+    /// - `pixel_geometry` pixel geometry
+    /// - `text_contrast` text contrast
+    /// - `text_gamma` text gamma
+    pub fn new_with_text_properties(
+        flags: SurfacePropsFlags,
+        pixel_geometry: PixelGeometry,
+        text_contrast: scalar,
+        text_gamma: scalar,
+    ) -> SurfaceProps {
+        Self::from_native_c(unsafe {
+            SkSurfaceProps::new2(
+                flags.bits(),
+                pixel_geometry.into_native(),
+                text_contrast,
+                text_gamma,
+            )
         })
     }
 
@@ -107,13 +138,45 @@ impl SurfaceProps {
         SurfacePropsFlags::from_bits_truncate(self.native().fFlags)
     }
 
+    #[must_use]
+    pub fn clone_with_pixel_geometry(&self, new_pixel_geometry: PixelGeometry) -> Self {
+        Self::new_with_text_properties(
+            self.flags(),
+            new_pixel_geometry,
+            self.text_contrast(),
+            self.text_gamma(),
+        )
+    }
+
+    pub const MAX_CONTRAST_INCLUSIVE: scalar = 1.;
+    pub const MIN_CONTRAST_INCLUSIVE: scalar = 0.;
+    pub const MAX_GAMMA_EXCLUSIVE: scalar = 4.;
+    pub const MIN_GAMMA_INCLUSIVE: scalar = 0.;
+
     pub fn pixel_geometry(self) -> PixelGeometry {
         PixelGeometry::from_native_c(self.native().fPixelGeometry)
+    }
+
+    pub fn text_contrast(self) -> scalar {
+        self.native().fTextContrast
+    }
+
+    pub fn text_gamma(self) -> scalar {
+        self.native().fTextGamma
     }
 
     pub fn is_use_device_independent_fonts(self) -> bool {
         self.flags()
             .contains(SurfacePropsFlags::USE_DEVICE_INDEPENDENT_FONTS)
+    }
+
+    pub fn is_always_dither(self) -> bool {
+        self.flags().contains(SurfacePropsFlags::ALWAYS_DITHER)
+    }
+
+    pub fn preserves_transparent_draws(self) -> bool {
+        self.flags()
+            .contains(SurfacePropsFlags::PRESERVES_TRANSPARENT_DRAWS)
     }
 }
 

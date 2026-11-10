@@ -1,10 +1,13 @@
-use crate::{prelude::*, scalar, BlurStyle, CoverageMode, Matrix, NativeFlattenable};
-use skia_bindings::{self as sb, SkFlattenable, SkMaskFilter, SkRefCntBase};
 use std::fmt;
 
+use skia_bindings::{self as sb, SkFlattenable, SkMaskFilter, SkRefCntBase};
+
+use crate::{BlurStyle, NativeFlattenable, prelude::*, scalar};
+
+/// MaskFilter is the base class for object that perform transformations on the mask before drawing
+/// it. An example subclass is Blur.
 pub type MaskFilter = RCHandle<SkMaskFilter>;
-unsafe impl Send for MaskFilter {}
-unsafe impl Sync for MaskFilter {}
+unsafe_send_sync!(MaskFilter);
 
 impl NativeBase<SkRefCntBase> for SkMaskFilter {}
 impl NativeBase<SkFlattenable> for SkMaskFilter {}
@@ -30,6 +33,13 @@ impl fmt::Debug for MaskFilter {
 }
 
 impl MaskFilter {
+    /// Create a blur mask filter.
+    ///
+    /// - `style`       The [`BlurStyle`] to use
+    /// - `sigma`       Standard deviation of the Gaussian blur to apply. Must be > 0.
+    /// - `respect_ctm` if `true` the blur's sigma is modified by the `ctm`.
+    ///
+    /// Returns the new blur mask filter
     pub fn blur(
         style: BlurStyle,
         sigma: scalar,
@@ -38,20 +48,5 @@ impl MaskFilter {
         Self::from_ptr(unsafe {
             sb::C_SkMaskFilter_MakeBlur(style, sigma, respect_ctm.into().unwrap_or(true))
         })
-    }
-
-    #[deprecated(since = "0.30.0", note = "removed without replacement")]
-    pub fn compose(_outer: Self, _inner: Self) -> ! {
-        panic!("removed without replacement")
-    }
-
-    #[deprecated(since = "0.30.0", note = "removed without replacement")]
-    pub fn combine(_filter_a: Self, _filter_b: Self, _mode: CoverageMode) -> ! {
-        panic!("removed without replacement")
-    }
-
-    #[deprecated(since = "0.29.0", note = "removed without replacement")]
-    pub fn with_matrix(&self, _matrix: &Matrix) -> ! {
-        unimplemented!("removed without replacement")
     }
 }

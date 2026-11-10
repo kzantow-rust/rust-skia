@@ -1,7 +1,5 @@
-use crate::prelude::NativeTransmutable;
-use crate::{ISize, Matrix};
-use skia_bindings as sb;
-use skia_bindings::SkEncodedOrigin;
+use crate::{ISize, Matrix, prelude::*};
+use skia_bindings::{self as sb, SkEncodedOrigin};
 
 // Even though possible, we are not using the original SkEncodedOrigin enum, because of the
 // `to_matrix()` implementation below, which needs an `ISize` and so can not be implemented in the
@@ -9,9 +7,10 @@ use skia_bindings::SkEncodedOrigin;
 
 /// These values match the orientation www.exif.org/Exif2-2.PDF.
 #[repr(i32)]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub enum EncodedOrigin {
     /// Default
+    #[default]
     TopLeft = SkEncodedOrigin::TopLeft as _,
     /// Reflected across y-axis
     TopRight = SkEncodedOrigin::TopRight as _,
@@ -29,13 +28,7 @@ pub enum EncodedOrigin {
     LeftBottom = SkEncodedOrigin::LeftBottom as _,
 }
 
-impl NativeTransmutable<SkEncodedOrigin> for EncodedOrigin {}
-
-impl Default for EncodedOrigin {
-    fn default() -> Self {
-        EncodedOrigin::TopLeft
-    }
-}
+native_transmutable!(SkEncodedOrigin, EncodedOrigin);
 
 impl EncodedOrigin {
     pub const LAST: Self = EncodedOrigin::LeftBottom;
@@ -58,19 +51,24 @@ impl EncodedOrigin {
         m
     }
 
+    /// Return a matrix equal to [`EncodedOrigin::to_matrix()`]`(self, w, h).invert()`.
+    pub fn to_matrix_inverse(self, size: impl Into<ISize>) -> Matrix {
+        let size = size.into();
+        let mut m = Matrix::default();
+        unsafe {
+            sb::C_SkEncodedOriginToMatrixInverse(
+                self.into_native(),
+                size.width,
+                size.height,
+                m.native_mut(),
+            )
+        };
+        m
+    }
+
     /// Return `true` if the encoded origin includes a 90 degree rotation, in which case the width
     /// and height of the source data are swapped relative to a correctly oriented destination.
     pub fn swaps_width_height(self) -> bool {
         (self as i32) >= EncodedOrigin::LeftTop as i32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{prelude::NativeTransmutable, EncodedOrigin};
-
-    #[test]
-    fn test_encoded_origin_layout() {
-        EncodedOrigin::test_layout();
     }
 }

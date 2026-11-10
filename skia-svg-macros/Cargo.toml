@@ -1,0 +1,20 @@
+[package]
+name = "skia-svg-macros"
+
+description = "Skia SVG Macros for Dom bindings"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+
+homepage = "https://github.com/rust-skia/rust-skia"
+repository = "https://github.com/rust-skia/rust-skia"
+documentation = "https://docs.rs/skia-svg-macros"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.87"
+quote = "1.0.37"
+syn = { version = "3.0.3", features = ["full"] }
